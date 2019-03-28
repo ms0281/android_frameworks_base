@@ -71,6 +71,7 @@ import android.os.BatteryManagerInternal;
 import android.os.BatterySaverPolicyConfig;
 import android.os.Binder;
 import android.os.Build;
+import android.os.FileUtils;
 import android.os.Handler;
 import android.os.HandlerExecutor;
 import android.os.IBinder;
@@ -149,6 +150,7 @@ import dalvik.annotation.optimization.NeverCompile;
 import lineageos.providers.LineageSettings;
 
 import java.io.FileDescriptor;
+import java.io.IOException;
 import java.io.PrintWriter;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
@@ -318,6 +320,11 @@ public final class PowerManagerService extends SystemService
             IntArray.wrap(new int[]{Display.DEFAULT_DISPLAY_GROUP});
 
     private static final int DEFAULT_BUTTON_ON_DURATION = 5 * 1000;
+
+    // Smart charging: sysfs node of charger
+    private static final String BATTERY_CHARGER_PATH =
+            "/sys/class/power_supply/battery/battery_charging_enabled";
+    private static final String CHARGER_PATH = "/sys/class/power_supply/battery/charging_enabled";
 
     private final Context mContext;
     private final ServiceThread mHandlerThread;
@@ -864,6 +871,16 @@ public final class PowerManagerService extends SystemService
             mLastUserActivityTime = now;
         }
     }
+
+    // Smart charging
+    private boolean mSmartChargingEnabled;
+    private int mSmartChargingLevel;
+    private int mSmartChargingLevelDefaultConfig;
+    // Handle charger
+    private boolean mUseCharger = true;
+    // Handle battery charging, when false the charger will keep the
+    // battery at the current level
+    private boolean mChargeBattery = true;
 
     /**
      * All times are in milliseconds. These constants are kept synchronized with the system
@@ -1520,6 +1537,12 @@ public final class PowerManagerService extends SystemService
         resolver.registerContentObserver(LineageSettings.System.getUriFor(
                 LineageSettings.System.FORCE_SHOW_NAVBAR),
                 false, mSettingsObserver, UserHandle.USER_ALL);
+        resolver.registerContentObserver(Settings.System.getUriFor(
+                Settings.System.SMART_CHARGING),
+                false, mSettingsObserver, UserHandle.USER_ALL);
+        resolver.registerContentObserver(Settings.System.getUriFor(
+                Settings.System.SMART_CHARGING_LEVEL),
+                false, mSettingsObserver, UserHandle.USER_ALL);
 
         // Register for broadcasts from other components of the system.
         IntentFilter filter = new IntentFilter();
@@ -1599,6 +1622,8 @@ public final class PowerManagerService extends SystemService
             mProximityWakeLock = mContext.getSystemService(PowerManager.class)
                     .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ProximityWakeLock");
         }
+        mSmartChargingLevelDefaultConfig = resources.getInteger(
+                com.android.internal.R.integer.config_smartChargingBatteryLevel);
     }
 
     @GuardedBy("mLock")
@@ -1634,6 +1659,11 @@ public final class PowerManagerService extends SystemService
                 LineageSettings.Global.WAKE_WHEN_PLUGGED_OR_UNPLUGGED,
                 (mWakeUpWhenPluggedOrUnpluggedConfig ? 1 : 0)) == 1;
         mAlwaysOnEnabled = mAmbientDisplayConfiguration.alwaysOnEnabled(UserHandle.USER_CURRENT);
+        mSmartChargingEnabled = Settings.System.getInt(resolver,
+                Settings.System.SMART_CHARGING, 0) == 1;
+        mSmartChargingLevel = Settings.System.getInt(resolver,
+                Settings.System.SMART_CHARGING_LEVEL,
+                mSmartChargingLevelDefaultConfig);
 
         if (mSupportsDoubleTapWakeConfig) {
             boolean doubleTapWakeEnabled = Settings.Secure.getIntForUser(resolver,
@@ -1680,6 +1710,7 @@ public final class PowerManagerService extends SystemService
     void handleSettingsChangedLocked() {
         updateSettingsLocked();
         updatePowerStateLocked();
+        updateSmartChargingStatus();
     }
 
     @GuardedBy("mLock")
@@ -2736,6 +2767,40 @@ public final class PowerManagerService extends SystemService
             }
 
             mBatterySaverStateMachine.setBatteryStatus(mIsPowered, mBatteryLevel, mBatteryLevelLow);
+            updateSmartChargingStatus();
+        }
+    }
+
+    private void updateSmartChargingStatus() {
+        if (mIsPowered || (mUseCharger == false)) {
+            boolean allowBatteryCharging = true;
+            boolean allowCharger = true;
+            if (mSmartChargingEnabled && (mBatteryLevel >= mSmartChargingLevel)) {
+                if (mBatteryLevel > mSmartChargingLevel) {
+                    allowCharger = false;
+                }
+                allowBatteryCharging = false;
+            }
+
+            if (mChargeBattery != allowBatteryCharging) {
+                try {
+                    mChargeBattery = allowBatteryCharging;
+                    FileUtils.stringToFile(BATTERY_CHARGER_PATH, mChargeBattery ? "1" : "0");
+                } catch (IOException e) {
+                    Slog.e(TAG, "failed to write to " + BATTERY_CHARGER_PATH);
+                    mChargeBattery = !mChargeBattery;
+                }
+            }
+
+            if (mUseCharger != allowCharger) {
+                try {
+                    mUseCharger = allowCharger;
+                    FileUtils.stringToFile(CHARGER_PATH, mUseCharger ? "1" : "0");
+                } catch (IOException e) {
+                    Slog.e(TAG, "failed to write to " + CHARGER_PATH);
+                    mUseCharger = !mUseCharger;
+                }
+            }
         }
     }
 
