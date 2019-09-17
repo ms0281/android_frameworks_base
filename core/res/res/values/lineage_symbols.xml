@@ -1,7 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
 
-   <!-- Smart charging battery percentage -->
+   <!-- Smart charging -->
+   <java-symbol type="string" name="config_SmartChargingSysfsNode" />
+   <java-symbol type="string" name="config_SmartChargingSuspendValue" />
+   <java-symbol type="string" name="config_SmartChargingResumeValue" />
    <java-symbol type="integer" name="config_smartChargingBatteryLevel" />
 
 </resources>
