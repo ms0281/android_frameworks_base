@@ -8181,7 +8181,8 @@ public class DevicePolicyManagerService extends BaseIDevicePolicyManager {
         }
 
         final CallerIdentity caller = getCallerIdentity(who);
-        Preconditions.checkCallAuthorization(hasFullCrossUsersPermission(caller, userHandle));
+        Preconditions.checkCallAuthorization(hasFullCrossUsersPermission(caller, userHandle)
+                || isCameraServerUid(caller));
 
         if (parent) {
             Preconditions.checkCallAuthorization(
@@ -9714,6 +9715,10 @@ public class DevicePolicyManagerService extends BaseIDevicePolicyManager {
 
     private boolean isShellUid(CallerIdentity caller) {
         return UserHandle.isSameApp(caller.getUid(), Process.SHELL_UID);
+    }
+
+    private boolean isCameraServerUid(CallerIdentity caller) {
+        return UserHandle.isSameApp(caller.getUid(), Process.CAMERASERVER_UID);
     }
 
     private @UserIdInt int getCurrentForegroundUserId() {
@@ -12560,8 +12565,8 @@ public class DevicePolicyManagerService extends BaseIDevicePolicyManager {
                 .setContentIntent(locationSettingsIntent)
                 .setAutoCancel(true)
                 .build();
-        mInjector.getNotificationManager().notify(SystemMessage.NOTE_LOCATION_CHANGED,
-                notification);
+        mHandler.post(() -> mInjector.getNotificationManager().notify(
+                SystemMessage.NOTE_LOCATION_CHANGED, notification));
     }
 
     private String getLocationChangedTitle() {
@@ -17731,7 +17736,7 @@ public class DevicePolicyManagerService extends BaseIDevicePolicyManager {
                 }
             }
 
-            onCreateAndProvisionManagedProfileCompleted(provisioningParams);
+            onCreateAndProvisionManagedProfileCompleted(userInfo.id, provisioningParams);
 
             sendProvisioningCompletedBroadcast(
                     userInfo.id,
@@ -17803,8 +17808,17 @@ public class DevicePolicyManagerService extends BaseIDevicePolicyManager {
      *
      * <p>This method is meant to be overridden by OEMs.
      */
-    private void onCreateAndProvisionManagedProfileCompleted(
-            ManagedProfileProvisioningParams provisioningParams) {}
+    private void onCreateAndProvisionManagedProfileCompleted(int userId,
+            ManagedProfileProvisioningParams provisioningParams) {
+        try {
+            Set<Integer> uids = ConnectivitySettingsManager.getUidsAllowedOnRestrictedNetworks(
+                    mContext);
+            uids.add(mContext.getPackageManager().getPackageUidAsUser(
+                    provisioningParams.getOwnerName(), userId));
+            ConnectivitySettingsManager.setUidsAllowedOnRestrictedNetworks(mContext, uids);
+        } catch (NameNotFoundException ignored) {
+        }
+    }
 
     private void maybeInstallDevicePolicyManagementRoleHolderInUser(int targetUserId) {
         String devicePolicyManagerRoleHolderPackageName =
