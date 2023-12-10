@@ -7440,6 +7440,9 @@ message MetricsEvent {
 
     // Fork Lineage
     FORKLINEAGE = 3000;
+    
+    // Evolution
+    EVO_SETTINGS = 3100;
 
   }
 }
