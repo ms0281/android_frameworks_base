@@ -76,6 +76,9 @@ interface MobileIconInteractor {
     /** Observable for RAT type (network type) indicator */
     val networkTypeIconGroup: StateFlow<NetworkTypeIconModel>
 
+    /** Whether or not to show the slice attribution */
+    val showSliceAttribution: StateFlow<Boolean>
+
     /**
      * Provider name for this network connection. The name can be one of 3 values:
      * 1. The default network name, if one is configured
@@ -238,6 +241,9 @@ class MobileIconInteractorImpl(
                 DefaultIcon(defaultMobileIconGroup.value),
             )
 
+    override val showSliceAttribution: StateFlow<Boolean> =
+        connectionRepository.hasPrioritizedNetworkCapabilities
+
     override val isRoaming: StateFlow<Boolean> =
         combine(
                 connectionRepository.carrierNetworkChangeActive,
@@ -295,7 +301,7 @@ class MobileIconInteractorImpl(
                 isInService,
             ) { isDefaultDataEnabled, isDefaultConnectionFailed, isInService ->
                 val mobileIconIgnoresIWlan = context.resources.getBoolean(
-                        com.android.systemui.R.bool.config_mobileIconIgnoresIWlan)
+                        com.android.systemui.res.R.bool.config_mobileIconIgnoresIWlan)
                 (!isDefaultDataEnabled && !mobileIconIgnoresIWlan) || isDefaultConnectionFailed ||
                         !isInService
             }

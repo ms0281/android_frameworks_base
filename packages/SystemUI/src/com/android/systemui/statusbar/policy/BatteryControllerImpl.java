@@ -20,7 +20,6 @@ import static android.os.BatteryManager.CHARGING_POLICY_ADAPTIVE_LONGLIFE;
 import static android.os.BatteryManager.CHARGING_POLICY_DEFAULT;
 import static android.os.BatteryManager.EXTRA_CHARGING_STATUS;
 import static android.os.BatteryManager.EXTRA_PRESENT;
-
 import static com.android.settingslib.fuelgauge.BatterySaverLogging.SAVER_ENABLED_QS;
 import static com.android.systemui.util.DumpUtilsKt.asIndenting;
 
@@ -91,6 +90,7 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
     private final PowerManager mPowerManager;
     private final DemoModeController mDemoModeController;
     private final DumpManager mDumpManager;
+    private final BatteryControllerLogger mLogger;
     private final Handler mMainHandler;
     private final Handler mBgHandler;
     protected final Context mContext;
@@ -129,6 +129,7 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
             BroadcastDispatcher broadcastDispatcher,
             DemoModeController demoModeController,
             DumpManager dumpManager,
+            BatteryControllerLogger logger,
             @Main Handler mainHandler,
             @Background Handler bgHandler) {
         mContext = context;
@@ -139,6 +140,8 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
         mBroadcastDispatcher = broadcastDispatcher;
         mDemoModeController = demoModeController;
         mDumpManager = dumpManager;
+        mLogger = logger;
+        mLogger.logBatteryControllerInstance(this);
     }
 
     private void registerReceiver() {
@@ -152,6 +155,7 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
 
     @Override
     public void init() {
+        mLogger.logBatteryControllerInit(this, mHasReceivedBattery);
         registerReceiver();
         if (!mHasReceivedBattery) {
             // Get initial state. Relying on Sticky behavior until API for getting info.
@@ -239,8 +243,13 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
     @Override
     public void onReceive(final Context context, Intent intent) {
         final String action = intent.getAction();
+        mLogger.logIntentReceived(action);
         if (action.equals(Intent.ACTION_BATTERY_CHANGED)) {
-            if (mTestMode && !intent.getBooleanExtra("testmode", false)) return;
+            mLogger.logBatteryChangedIntent(intent);
+            if (mTestMode && !intent.getBooleanExtra("testmode", false)) {
+                mLogger.logBatteryChangedSkipBecauseTest();
+                return;
+            }
             mHasReceivedBattery = true;
             mLevel = (int) (100f
                     * intent.getIntExtra(BatteryManager.EXTRA_LEVEL, 0)
@@ -286,6 +295,7 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
                 fireIsIncompatibleChargingChanged();
             }
         } else if (action.equals(ACTION_LEVEL_TEST)) {
+            mLogger.logEnterTestMode();
             mTestMode = true;
             mMainHandler.post(new Runnable() {
                 int mCurrentLevel = 0;
@@ -297,6 +307,7 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
                 @Override
                 public void run() {
                     if (mCurrentLevel < 0) {
+                        mLogger.logExitTestMode();
                         mTestMode = false;
                         mTestIntent.putExtra("level", mSavedLevel);
                         mTestIntent.putExtra("plugged", mSavedPluggedIn);
@@ -449,6 +460,7 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
     }
 
     protected void fireBatteryLevelChanged() {
+        mLogger.logBatteryLevelChangedCallback(mLevel, mPluggedIn, mCharging);
         synchronized (mChangeCallbacks) {
             final int N = mChangeCallbacks.size();
             for (int i = 0; i < N; i++) {

@@ -38,9 +38,9 @@ public class GlobalActionsPowerDialog {
      */
     public static Dialog create(@NonNull Context context, ListAdapter adapter) {
         ViewGroup listView = (ViewGroup) LayoutInflater.from(context).inflate(
-                com.android.systemui.R.layout.global_actions_power_dialog_flow, null);
+                com.android.systemui.res.R.layout.global_actions_power_dialog_flow, null);
 
-        Flow flow = listView.findViewById(com.android.systemui.R.id.power_flow);
+        Flow flow = listView.findViewById(com.android.systemui.res.R.id.power_flow);
 
         for (int i = 0; i < adapter.getCount(); i++) {
             View action = adapter.getView(i, null, listView);
@@ -52,7 +52,7 @@ public class GlobalActionsPowerDialog {
         Resources res = context.getResources();
 
         int nElementsWrap = res.getInteger(
-                com.android.systemui.R.integer.power_menu_lite_max_columns);
+                com.android.systemui.res.R.integer.power_menu_lite_max_columns);
         int nChildren = listView.getChildCount() - 1; // don't count flow element
 
         // Avoid having just one action on the last row if there are more than 2 columns because
@@ -70,7 +70,7 @@ public class GlobalActionsPowerDialog {
         window.setType(WindowManager.LayoutParams.TYPE_VOLUME_OVERLAY);
         window.setTitle(""); // prevent Talkback from speaking first item name twice
         window.setBackgroundDrawable(res.getDrawable(
-                com.android.systemui.R.drawable.global_actions_lite_background,
+                com.android.systemui.res.R.drawable.global_actions_lite_background,
                 context.getTheme()));
         window.addFlags(WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM);
 

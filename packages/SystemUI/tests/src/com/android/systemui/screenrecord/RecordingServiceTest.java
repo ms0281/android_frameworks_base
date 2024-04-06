@@ -41,7 +41,7 @@ import androidx.test.filters.SmallTest;
 
 import com.android.internal.logging.UiEventLogger;
 import com.android.systemui.SysuiTestCase;
-import com.android.systemui.media.MediaProjectionCaptureTarget;
+import com.android.systemui.mediaprojection.MediaProjectionCaptureTarget;
 import com.android.systemui.plugins.ActivityStarter;
 import com.android.systemui.settings.UserContextProvider;
 import com.android.systemui.statusbar.SysuiStatusBarStateController;
@@ -138,7 +138,8 @@ public class RecordingServiceTest extends SysuiTestCase {
 
     @Test
     public void testLogStartFullScreenRecording() {
-        Intent startIntent = RecordingService.getStartIntent(mContext, 0, 0, false, null);
+        Intent startIntent = RecordingService.getStartIntent(mContext, 0, 0, false, null, false,
+                false, false, false);
         mRecordingService.onStartCommand(startIntent, 0, 0);
 
         verify(mUiEventLogger, times(1)).log(Events.ScreenRecordEvent.SCREEN_RECORD_START);
@@ -147,7 +148,8 @@ public class RecordingServiceTest extends SysuiTestCase {
     @Test
     public void testLogStartPartialRecording() {
         MediaProjectionCaptureTarget target = new MediaProjectionCaptureTarget(new Binder());
-        Intent startIntent = RecordingService.getStartIntent(mContext, 0, 0, false, target);
+        Intent startIntent = RecordingService.getStartIntent(mContext, 0, 0, false, target, false,
+                false, false, false);
         mRecordingService.onStartCommand(startIntent, 0, 0);
 
         verify(mUiEventLogger, times(1)).log(Events.ScreenRecordEvent.SCREEN_RECORD_START);
@@ -180,7 +182,8 @@ public class RecordingServiceTest extends SysuiTestCase {
         // When the screen recording does not start properly
         doThrow(new RuntimeException("fail")).when(mScreenMediaRecorder).start();
 
-        Intent startIntent = RecordingService.getStartIntent(mContext, 0, 0, false, null);
+        Intent startIntent = RecordingService.getStartIntent(mContext, 0, 0, false, null, false,
+                false, false, false);
         mRecordingService.onStartCommand(startIntent, 0, 0);
 
         assertUpdateState(false);

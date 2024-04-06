@@ -27,16 +27,18 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.Divider
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
 import com.android.settingslib.spa.framework.compose.rememberDrawablePainter
 import com.android.settingslib.spa.framework.theme.SettingsDimension
+import com.android.settingslib.spa.widget.ui.CopyableBody
 import com.android.settingslib.spa.widget.ui.SettingsBody
 import com.android.settingslib.spa.widget.ui.SettingsTitle
 import com.android.settingslib.spaprivileged.R
@@ -55,7 +57,7 @@ class AppInfoProvider(private val packageInfo: PackageInfo) {
                 .semantics(mergeDescendants = true) {},
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            val app = packageInfo.applicationInfo
+            val app = checkNotNull(packageInfo.applicationInfo)
             Box(modifier = Modifier.padding(SettingsDimension.itemPaddingAround)) {
                 AppIcon(app = app, size = SettingsDimension.appIconInfoSize)
             }
@@ -68,36 +70,42 @@ class AppInfoProvider(private val packageInfo: PackageInfo) {
     @Composable
     private fun InstallType(app: ApplicationInfo) {
         if (!app.isInstantApp) return
-        Spacer(modifier = Modifier.height(4.dp))
-        SettingsBody(stringResource(R.string.install_type_instant))
+        Spacer(modifier = Modifier.height(SettingsDimension.paddingSmall))
+        SettingsBody(
+            stringResource(
+                com.android.settingslib.widget.preference.app.R.string.install_type_instant
+            )
+        )
     }
 
     @Composable
     private fun AppVersion() {
-        if (packageInfo.versionName == null) return
-        Spacer(modifier = Modifier.height(4.dp))
-        SettingsBody(packageInfo.versionNameBidiWrapped)
+        val versionName = packageInfo.versionNameBidiWrapped ?: return
+        Spacer(modifier = Modifier.height(SettingsDimension.paddingSmall))
+        SettingsBody(versionName)
     }
 
     @Composable
     fun FooterAppVersion() {
-        if (packageInfo.versionName == null) return
-        Divider()
-        Box(modifier = Modifier.padding(SettingsDimension.itemPadding)) {
-            SettingsBody(stringResource(R.string.version_text, packageInfo.versionNameBidiWrapped))
+        val context = LocalContext.current
+        val footer = remember(packageInfo) {
+            val list = mutableListOf<String>()
+            packageInfo.versionNameBidiWrapped?.let {
+                list += context.getString(R.string.version_text, it)
+            }
+            list += packageInfo.packageName
+            list.joinToString(separator = System.lineSeparator())
         }
-    }
-
-    @Composable
-    fun FooterAppPackageName() {
-        Box(modifier = Modifier.padding(SettingsDimension.itemPadding)) {
-            SettingsBody(packageInfo.packageName)
+        if (footer.isBlank()) return
+        HorizontalDivider()
+        Column(modifier = Modifier.padding(SettingsDimension.itemPadding)) {
+            CopyableBody(footer)
         }
     }
 
     private companion object {
         /** Wrapped the version name, so its directionality still keep same when RTL. */
-        val PackageInfo.versionNameBidiWrapped: String
+        val PackageInfo.versionNameBidiWrapped: String?
             get() = BidiFormatter.getInstance().unicodeWrap(versionName)
     }
 }
@@ -115,5 +123,5 @@ internal fun AppIcon(app: ApplicationInfo, size: Dp) {
 @Composable
 internal fun AppLabel(app: ApplicationInfo, isClonedAppPage: Boolean = false) {
     val appRepository = rememberAppRepository()
-    SettingsTitle(title = appRepository.produceLabel(app, isClonedAppPage), useMediumWeight = true)
+    SettingsTitle(appRepository.produceLabel(app, isClonedAppPage).value, useMediumWeight = true)
 }

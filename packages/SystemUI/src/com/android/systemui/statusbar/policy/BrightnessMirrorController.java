@@ -30,7 +30,7 @@ import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 
-import com.android.systemui.R;
+import com.android.systemui.res.R;
 import com.android.systemui.settings.brightness.BrightnessSliderController;
 import com.android.systemui.settings.brightness.ToggleSlider;
 import com.android.systemui.shade.NotificationShadeWindowView;
@@ -220,8 +220,8 @@ public class BrightnessMirrorController
                     UserHandle.USER_CURRENT);
             boolean isAutomatic = automatic != Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL;
             mIcon.setImageResource(isAutomatic
-                    ? com.android.systemui.R.drawable.ic_qs_brightness_auto_on
-                    : com.android.systemui.R.drawable.ic_qs_brightness_auto_off);
+                    ? R.drawable.ic_qs_brightness_auto_on
+                    : R.drawable.ic_qs_brightness_auto_off);
             mIcon.setVisibility(View.VISIBLE);
         } else {
             mIcon.setVisibility(View.GONE);

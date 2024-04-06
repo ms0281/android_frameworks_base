@@ -30,7 +30,6 @@ import android.view.View;
 import androidx.annotation.Nullable;
 
 import com.android.internal.logging.MetricsLogger;
-import com.android.systemui.R;
 import com.android.systemui.dagger.qualifiers.Background;
 import com.android.systemui.dagger.qualifiers.Main;
 import com.android.systemui.plugins.ActivityStarter;
@@ -41,6 +40,7 @@ import com.android.systemui.qs.QSHost;
 import com.android.systemui.qs.QsEventLogger;
 import com.android.systemui.qs.logging.QSLogger;
 import com.android.systemui.qs.tileimpl.QSTileImpl;
+import com.android.systemui.res.R;
 import com.android.systemui.statusbar.policy.BatteryController;
 
 import org.lineageos.internal.logging.LineageMetricsLogger;
@@ -188,10 +188,6 @@ public class PowerShareTile extends QSTileImpl<BooleanState>
             return;
         }
 
-        if (state.slash == null) {
-            state.slash = new SlashState();
-        }
-
         state.icon = ResourceIcon.get(R.drawable.ic_qs_powershare);
         try {
             state.value = mPowerShare.isEnabled();
@@ -199,7 +195,6 @@ public class PowerShareTile extends QSTileImpl<BooleanState>
             state.value = false;
             ex.printStackTrace();
         }
-        state.slash.isSlashed = state.value;
         state.label = mContext.getString(R.string.quick_settings_powershare_label);
 
         if (mBatteryController.isPowerSave() || getBatteryLevel() < getMinBatteryLevel()) {
