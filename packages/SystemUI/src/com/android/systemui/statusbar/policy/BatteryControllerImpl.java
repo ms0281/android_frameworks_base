@@ -91,7 +91,7 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
 
     protected int mLevel;
     protected boolean mPluggedIn;
-    protected boolean mPresent = true;
+    protected boolean mPresent;
     private int mPluggedChargingSource;
     protected boolean mCharging;
     private boolean mStateUnknown = false;
@@ -242,7 +242,7 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
                 fireBatteryPresentChanged();
             }
 
-            boolean unknown = !mPresent;
+            boolean unknown = !present;
             if (unknown != mStateUnknown) {
                 mStateUnknown = unknown;
                 fireBatteryUnknownStateChanged();
