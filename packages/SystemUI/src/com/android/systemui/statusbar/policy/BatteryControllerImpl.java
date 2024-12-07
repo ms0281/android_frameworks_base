@@ -99,7 +99,6 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
 
     protected int mLevel;
     protected boolean mPluggedIn;
-    protected boolean mPresent;
     private int mPluggedChargingSource;
     protected boolean mCharging;
     private boolean mStateUnknown = false;
@@ -184,7 +183,6 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
         ipw.print("mHasReceivedBattery="); ipw.println(mHasReceivedBattery);
         ipw.print("mLevel="); ipw.println(mLevel);
         ipw.print("mPluggedIn="); ipw.println(mPluggedIn);
-        ipw.print("mPresent="); ipw.println(mPresent);
         ipw.print("mCharging="); ipw.println(mCharging);
         ipw.print("mCharged="); ipw.println(mCharged);
         ipw.print("mIsBatteryDefender="); ipw.println(mIsBatteryDefender);
@@ -235,7 +233,6 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
         cb.onWirelessChargingChanged(mWirelessCharging);
         cb.onIsBatteryDefenderChanged(mIsBatteryDefender);
         cb.onIsIncompatibleChargingChanged(mIsIncompatibleCharging);
-        cb.onBatteryPresentChanged(mPresent);
     }
 
     @Override
@@ -273,11 +270,6 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
             }
 
             boolean present = intent.getBooleanExtra(EXTRA_PRESENT, true);
-            if (present != mPresent) {
-                mPresent = present;
-                fireBatteryPresentChanged();
-            }
-
             boolean unknown = !present;
             if (unknown != mStateUnknown) {
                 mStateUnknown = unknown;
@@ -352,11 +344,6 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
     @Override
     public boolean isPluggedIn() {
         return mPluggedIn;
-    }
-
-    @Override
-    public boolean isPresent() {
-        return mPresent;
     }
 
     @Override
@@ -529,11 +516,6 @@ public class BatteryControllerImpl extends BroadcastReceiver implements BatteryC
         mLastLevel = mLevel;
     }
     
-    private void fireBatteryPresentChanged() {
-        dispatchSafeChange(
-                (callback) -> callback.onBatteryPresentChanged(mPresent));
-    }
-
     @Override
     public void dispatchDemoCommand(String command, Bundle args) {
         if (!mDemoModeController.isInDemoMode()) {
