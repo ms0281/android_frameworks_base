@@ -180,6 +180,7 @@ import com.android.server.SystemServiceManager;
 import com.android.server.companion.virtual.VirtualDeviceManagerInternal;
 import com.android.server.pm.PackageList;
 import com.android.server.pm.PackageManagerLocal;
+import com.android.server.pm.ProtectedPackages;
 import com.android.server.pm.UserManagerInternal;
 import com.android.server.pm.pkg.AndroidPackage;
 import com.android.server.pm.pkg.PackageState;
@@ -235,6 +236,13 @@ public class AppOpsService extends IAppOpsService.Stub {
      * Increment by one every time an upgrade step is added at boot, none currently exists.
      */
     private static final int CURRENT_VERSION = 1;
+
+    /**
+     * The upper limit of total number of attributed op entries that can be returned in a binder
+     * transaction to avoid TransactionTooLargeException
+     */
+    private static final int NUM_ATTRIBUTED_OP_ENTRY_THRESHOLD = 2000;
+
 
     private SensorPrivacyManager mSensorPrivacyManager;
 
@@ -300,6 +308,8 @@ public class AppOpsService extends IAppOpsService.Stub {
 
     private final IPlatformCompat mPlatformCompat = IPlatformCompat.Stub.asInterface(
             ServiceManager.getService(Context.PLATFORM_COMPAT_SERVICE));
+
+    private ProtectedPackages mProtectedPackages;
 
     /**
      * Registered callbacks, called from {@link #collectAsyncNotedOp}.
@@ -603,7 +613,7 @@ public class AppOpsService extends IAppOpsService.Stub {
         }
     }
 
-    /** Returned from {@link #verifyAndGetBypass(int, String, String, String, boolean)}. */
+    /** Returned from {@link #verifyAndGetBypass(int, String, String, int, String, boolean)}. */
     private static final class PackageVerificationResult {
 
         final RestrictionBypass bypass;
@@ -1699,6 +1709,8 @@ public class AppOpsService extends IAppOpsService.Stub {
                 Manifest.permission.GET_APP_OPS_STATS,
                 Binder.getCallingPid(), Binder.getCallingUid())
                 == PackageManager.PERMISSION_GRANTED;
+        int totalAttributedOpEntryCount = 0;
+
         if (ops == null) {
             resOps = new ArrayList<>();
             for (int j = 0; j < pkgOps.size(); j++) {
@@ -1706,7 +1718,12 @@ public class AppOpsService extends IAppOpsService.Stub {
                 if (opRestrictsRead(curOp.op) && !shouldReturnRestrictedAppOps) {
                     continue;
                 }
-                resOps.add(getOpEntryForResult(curOp, persistentDeviceId));
+                if (totalAttributedOpEntryCount > NUM_ATTRIBUTED_OP_ENTRY_THRESHOLD) {
+                    break;
+                }
+                OpEntry opEntry = getOpEntryForResult(curOp, persistentDeviceId);
+                resOps.add(opEntry);
+                totalAttributedOpEntryCount += opEntry.getAttributedOpEntries().size();
             }
         } else {
             for (int j = 0; j < ops.length; j++) {
@@ -1718,10 +1735,21 @@ public class AppOpsService extends IAppOpsService.Stub {
                     if (opRestrictsRead(curOp.op) && !shouldReturnRestrictedAppOps) {
                         continue;
                     }
-                    resOps.add(getOpEntryForResult(curOp, persistentDeviceId));
+                    if (totalAttributedOpEntryCount > NUM_ATTRIBUTED_OP_ENTRY_THRESHOLD) {
+                        break;
+                    }
+                    OpEntry opEntry = getOpEntryForResult(curOp, persistentDeviceId);
+                    resOps.add(opEntry);
+                    totalAttributedOpEntryCount += opEntry.getAttributedOpEntries().size();
                 }
             }
         }
+
+        if (totalAttributedOpEntryCount > NUM_ATTRIBUTED_OP_ENTRY_THRESHOLD) {
+            Slog.w(TAG, "The number of attributed op entries has exceeded the threshold. This "
+                    + "could be due to DoS attack from malicious apps. The result is throttled.");
+        }
+
         return resOps;
     }
 
@@ -2074,6 +2102,12 @@ public class AppOpsService extends IAppOpsService.Stub {
 
         enforceManageAppOpsModes(Binder.getCallingPid(), Binder.getCallingUid(), uid);
         verifyIncomingOp(code);
+
+        if (isDeviceProvisioningPackage(uid, null)) {
+            Slog.w(TAG, "Cannot set uid mode for device provisioning app by Shell");
+            return;
+        }
+
         code = AppOpsManager.opToSwitch(code);
 
         if (permissionPolicyCallback == null) {
@@ -2384,6 +2418,11 @@ public class AppOpsService extends IAppOpsService.Stub {
             return;
         }
 
+        if (isDeviceProvisioningPackage(uid, packageName)) {
+            Slog.w(TAG, "Cannot set op mode for device provisioning app by Shell");
+            return;
+        }
+
         code = AppOpsManager.opToSwitch(code);
 
         PackageVerificationResult pvr;
@@ -2412,6 +2451,36 @@ public class AppOpsService extends IAppOpsService.Stub {
         }
 
         notifyStorageManagerOpModeChangedSync(code, uid, packageName, mode, previousMode);
+    }
+
+    // Device provisioning package is restricted from setting app op mode through shell command
+    private boolean isDeviceProvisioningPackage(int uid,
+            @Nullable String packageName) {
+        if (UserHandle.getAppId(Binder.getCallingUid()) == Process.SHELL_UID) {
+            ProtectedPackages protectedPackages = getProtectedPackages();
+
+            if (packageName != null && protectedPackages.isDeviceProvisioningPackage(packageName)) {
+                return true;
+            }
+
+            String[] packageNames = mContext.getPackageManager().getPackagesForUid(uid);
+            if (packageNames != null) {
+                for (String pkg : packageNames) {
+                    if (protectedPackages.isDeviceProvisioningPackage(pkg)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    // Race condition is allowed here for better performance
+    private ProtectedPackages getProtectedPackages() {
+        if (mProtectedPackages == null) {
+            mProtectedPackages = new ProtectedPackages(mContext);
+        }
+        return mProtectedPackages;
     }
 
     private void notifyOpChanged(ArraySet<OnOpModeChangedListener> callbacks, int code,
@@ -3086,10 +3155,10 @@ public class AppOpsService extends IAppOpsService.Stub {
     public int checkPackage(int uid, String packageName) {
         Objects.requireNonNull(packageName);
         try {
-            verifyAndGetBypass(uid, packageName, null, null, true);
+            verifyAndGetBypass(uid, packageName, null, Process.INVALID_UID, null, true);
             // When the caller is the system, it's possible that the packageName is the special
             // one (e.g., "root") which isn't actually existed.
-            if (resolveUid(packageName) == uid
+            if (resolveNonAppUid(packageName) == uid
                     || (isPackageExisted(packageName)
                             && !filterAppAccessUnlocked(packageName, UserHandle.getUserId(uid)))) {
                 return AppOpsManager.MODE_ALLOWED;
@@ -3288,7 +3357,7 @@ public class AppOpsService extends IAppOpsService.Stub {
             boolean shouldCollectMessage) {
         PackageVerificationResult pvr;
         try {
-            pvr = verifyAndGetBypass(uid, packageName, attributionTag, proxyPackageName);
+            pvr = verifyAndGetBypass(uid, packageName, attributionTag, proxyUid, proxyPackageName);
             if (!pvr.isAttributionTagValid) {
                 attributionTag = null;
             }
@@ -3875,7 +3944,7 @@ public class AppOpsService extends IAppOpsService.Stub {
             // Test if the proxied operation will succeed before starting the proxy operation
             final SyncNotedAppOp testProxiedOp = startOperationDryRun(code,
                     proxiedUid, resolvedProxiedPackageName, proxiedAttributionTag,
-                    proxiedVirtualDeviceId, resolvedProxyPackageName, proxiedFlags,
+                    proxiedVirtualDeviceId, proxyUid, resolvedProxyPackageName, proxiedFlags,
                     startIfModeDefault);
 
             if (!shouldStartForMode(testProxiedOp.getOpMode(), startIfModeDefault)) {
@@ -3915,7 +3984,7 @@ public class AppOpsService extends IAppOpsService.Stub {
             int attributionChainId) {
         PackageVerificationResult pvr;
         try {
-            pvr = verifyAndGetBypass(uid, packageName, attributionTag, proxyPackageName);
+            pvr = verifyAndGetBypass(uid, packageName, attributionTag, proxyUid, proxyPackageName);
             if (!pvr.isAttributionTagValid) {
                 attributionTag = null;
             }
@@ -4042,11 +4111,11 @@ public class AppOpsService extends IAppOpsService.Stub {
      */
     private SyncNotedAppOp startOperationDryRun(int code, int uid,
             @NonNull String packageName, @Nullable String attributionTag, int virtualDeviceId,
-            String proxyPackageName, @OpFlags int flags,
+            int proxyUid, String proxyPackageName, @OpFlags int flags,
             boolean startIfModeDefault) {
         PackageVerificationResult pvr;
         try {
-            pvr = verifyAndGetBypass(uid, packageName, attributionTag, proxyPackageName);
+            pvr = verifyAndGetBypass(uid, packageName, attributionTag, proxyUid, proxyPackageName);
             if (!pvr.isAttributionTagValid) {
                 attributionTag = null;
             }
@@ -4601,13 +4670,17 @@ public class AppOpsService extends IAppOpsService.Stub {
     private boolean isSpecialPackage(int callingUid, @Nullable String packageName) {
         final String resolvedPackage = AppOpsManager.resolvePackageName(callingUid, packageName);
         return callingUid == Process.SYSTEM_UID
-                || resolveUid(resolvedPackage) != Process.INVALID_UID;
+                || resolveNonAppUid(resolvedPackage) != Process.INVALID_UID;
     }
 
     private boolean isCallerAndAttributionTrusted(@NonNull AttributionSource attributionSource) {
         if (attributionSource.getUid() != Binder.getCallingUid()
                 && attributionSource.isTrusted(mContext)) {
-            return true;
+            // if there is a next attribution source, it must be trusted, as well.
+            if (attributionSource.getNext() == null
+                    || attributionSource.getNext().isTrusted(mContext)) {
+                return true;
+            }
         }
         return mContext.checkPermission(android.Manifest.permission.UPDATE_APP_OPS_STATS,
                 Binder.getCallingPid(), Binder.getCallingUid(), null)
@@ -4702,19 +4775,20 @@ public class AppOpsService extends IAppOpsService.Stub {
     }
 
     /**
-     * @see #verifyAndGetBypass(int, String, String, String, boolean)
+     * @see #verifyAndGetBypass(int, String, String, int, String, boolean)
      */
     private @NonNull PackageVerificationResult verifyAndGetBypass(int uid, String packageName,
             @Nullable String attributionTag) {
-        return verifyAndGetBypass(uid, packageName, attributionTag, null);
+        return verifyAndGetBypass(uid, packageName, attributionTag, Process.INVALID_UID, null);
     }
 
     /**
-     * @see #verifyAndGetBypass(int, String, String, String, boolean)
+     * @see #verifyAndGetBypass(int, String, String, int, String, boolean)
      */
     private @NonNull PackageVerificationResult verifyAndGetBypass(int uid, String packageName,
-            @Nullable String attributionTag, @Nullable String proxyPackageName) {
-        return verifyAndGetBypass(uid, packageName, attributionTag, proxyPackageName, false);
+            @Nullable String attributionTag, int proxyUid, @Nullable String proxyPackageName) {
+        return verifyAndGetBypass(uid, packageName, attributionTag, proxyUid, proxyPackageName,
+                false);
     }
 
     /**
@@ -4725,14 +4799,15 @@ public class AppOpsService extends IAppOpsService.Stub {
      * @param uid The uid the package belongs to
      * @param packageName The package the might belong to the uid
      * @param attributionTag attribution tag or {@code null} if no need to verify
-     * @param proxyPackageName The proxy package, from which the attribution tag is to be pulled
+     * @param proxyUid The proxy uid, from which the attribution tag is to be pulled
+     * @param proxyPackageName The proxy package, from which the attribution tag may be pulled
      * @param suppressErrorLogs Whether to print to logcat about nonmatching parameters
      *
      * @return PackageVerificationResult containing {@link RestrictionBypass} and whether the
      *         attribution tag is valid
      */
     private @NonNull PackageVerificationResult verifyAndGetBypass(int uid, String packageName,
-            @Nullable String attributionTag, @Nullable String proxyPackageName,
+            @Nullable String attributionTag, int proxyUid, @Nullable String proxyPackageName,
             boolean suppressErrorLogs) {
         if (uid == Process.ROOT_UID) {
             // For backwards compatibility, don't check package name for root UID.
@@ -4776,34 +4851,47 @@ public class AppOpsService extends IAppOpsService.Stub {
 
         int callingUid = Binder.getCallingUid();
 
-        // Allow any attribution tag for resolvable uids
-        int pkgUid;
+        // Allow any attribution tag for resolvable, non-app uids
+        int nonAppUid;
         if (Objects.equals(packageName, "com.android.shell")) {
             // Special case for the shell which is a package but should be able
             // to bypass app attribution tag restrictions.
-            pkgUid = Process.SHELL_UID;
+            nonAppUid = Process.SHELL_UID;
         } else {
-            pkgUid = resolveUid(packageName);
+            nonAppUid = resolveNonAppUid(packageName);
         }
-        if (pkgUid != Process.INVALID_UID) {
-            if (pkgUid != UserHandle.getAppId(uid)) {
+        if (nonAppUid != Process.INVALID_UID) {
+            if (nonAppUid != UserHandle.getAppId(uid)) {
                 if (!suppressErrorLogs) {
                     Slog.e(TAG, "Bad call made by uid " + callingUid + ". "
-                            + "Package \"" + packageName + "\" does not belong to uid " + uid
-                            + ".");
+                                + "Package \"" + packageName + "\" does not belong to uid " + uid
+                                + ".");
                 }
-                String otherUidMessage = DEBUG ? " but it is really " + pkgUid : " but it is not";
-                throw new SecurityException("Specified package \"" + packageName + "\" under uid "
-                        +  UserHandle.getAppId(uid) + otherUidMessage);
+                String otherUidMessage =
+                            DEBUG ? " but it is really " + nonAppUid : " but it is not";
+                throw new SecurityException("Specified package \"" + packageName
+                            + "\" under uid " +  UserHandle.getAppId(uid) + otherUidMessage);
+            }
+            // We only allow bypassing the attribution tag verification if the proxy is a
+            // system app (or is null), in order to prevent abusive apps clogging the appops
+            // system with unlimited attribution tags via proxy calls.
+            boolean proxyIsSystemAppOrNull = true;
+            if (proxyPackageName != null) {
+                int proxyAppId = UserHandle.getAppId(proxyUid);
+                if (proxyAppId >= Process.FIRST_APPLICATION_UID) {
+                    proxyIsSystemAppOrNull =
+                            mPackageManagerInternal.isSystemPackage(proxyPackageName);
+                }
             }
             return new PackageVerificationResult(RestrictionBypass.UNRESTRICTED,
-                    /* isAttributionTagValid */ true);
+                    /* isAttributionTagValid */ proxyIsSystemAppOrNull);
         }
 
         int userId = UserHandle.getUserId(uid);
         RestrictionBypass bypass = null;
         boolean isAttributionTagValid = false;
 
+        int pkgUid = nonAppUid;
         final long ident = Binder.clearCallingIdentity();
         try {
             PackageManagerInternal pmInt = LocalServices.getService(PackageManagerInternal.class);
@@ -5594,7 +5682,7 @@ public class AppOpsService extends IAppOpsService.Stub {
             if (nonpackageUid != -1) {
                 packageName = null;
             } else {
-                packageUid = resolveUid(packageName);
+                packageUid = resolveNonAppUid(packageName);
                 if (packageUid < 0) {
                     packageUid = AppGlobals.getPackageManager().getPackageUid(packageName,
                             PackageManager.MATCH_UNINSTALLED_PACKAGES, userId);
@@ -6694,7 +6782,13 @@ public class AppOpsService extends IAppOpsService.Stub {
                 if (restricted && attrOp.isRunning()) {
                     attrOp.pause();
                 } else if (attrOp.isPaused()) {
-                    attrOp.resume();
+                    RestrictionBypass bypass = verifyAndGetBypass(uid, ops.packageName, attrOp.tag)
+                            .bypass;
+                    if (!isOpRestrictedLocked(uid, code, ops.packageName, attrOp.tag,
+                            Context.DEVICE_ID_DEFAULT, bypass, false)) {
+                        // Only resume if there are no other restrictions remaining on this op
+                        attrOp.resume();
+                    }
                 }
             }
         }
@@ -7143,7 +7237,7 @@ public class AppOpsService extends IAppOpsService.Stub {
         }
     }
 
-    private static int resolveUid(String packageName)  {
+    private static int resolveNonAppUid(String packageName)  {
         if (packageName == null) {
             return Process.INVALID_UID;
         }

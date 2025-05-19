@@ -18,6 +18,7 @@ package com.android.server.power;
 
 import static android.hardware.display.DisplayManagerInternal.DisplayPowerRequest.policyToString;
 import static android.os.IServiceManager.DUMP_FLAG_PRIORITY_CRITICAL;
+import static android.os.PowerManager.BRIGHTNESS_OFF_FLOAT;
 import static android.os.PowerManager.GO_TO_SLEEP_REASON_DISPLAY_GROUPS_TURNED_OFF;
 import static android.os.PowerManager.GO_TO_SLEEP_REASON_DISPLAY_GROUP_REMOVED;
 import static android.os.PowerManager.WAKE_REASON_DISPLAY_GROUP_ADDED;
@@ -58,6 +59,9 @@ import android.content.PermissionChecker;
 import android.content.pm.PackageManager;
 import android.content.res.Resources;
 import android.database.ContentObserver;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.hardware.SystemSensorManager;
 import android.hardware.devicestate.DeviceState;
@@ -102,6 +106,7 @@ import android.provider.Settings;
 import android.provider.Settings.SettingNotFoundException;
 import android.service.dreams.DreamManagerInternal;
 import android.sysprop.PowerProperties;
+import android.telephony.TelephonyManager;
 import android.util.ArrayMap;
 import android.util.IntArray;
 import android.util.KeyValueListParser;
@@ -146,6 +151,8 @@ import com.android.server.power.feature.PowerManagerFlags;
 
 import dalvik.annotation.optimization.NeverCompile;
 
+import lineageos.providers.LineageSettings;
+
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.lang.annotation.Retention;
@@ -183,6 +190,8 @@ public final class PowerManagerService extends SystemService
 
     // Message: Sent when the policy want to release all timeout override wake locks.
     private static final int MSG_RELEASE_ALL_OVERRIDE_WAKE_LOCKS = 6;
+    // Message: Sent when waking up with proximity check.
+    private static final int MSG_WAKE_UP = 7;
 
     // Dirty bit: mWakeLocks changed
     private static final int DIRTY_WAKE_LOCKS = 1 << 0;
@@ -240,6 +249,9 @@ public final class PowerManagerService extends SystemService
     // Hardcoded for now until we decide what the right policy should be.
     // This should perhaps be a setting.
     private static final int SCREEN_BRIGHTNESS_BOOST_TIMEOUT = 5 * 1000;
+
+    // Threshold to consider proximity sensor covered
+    private static final float PROXIMITY_NEAR_THRESHOLD = 5.0f;
 
     // How long a partial wake lock must be held until we consider it a long wake lock.
     static final long MIN_LONG_WAKE_CHECK_INTERVAL = 60*1000;
@@ -311,6 +323,8 @@ public final class PowerManagerService extends SystemService
     private static final IntArray DEFAULT_DISPLAY_GROUP_IDS =
             IntArray.wrap(new int[]{Display.DEFAULT_DISPLAY_GROUP});
 
+    private static final int DEFAULT_BUTTON_ON_DURATION = 5 * 1000;
+
     private final Context mContext;
     private final ServiceThread mHandlerThread;
     private final Handler mHandler;
@@ -348,6 +362,15 @@ public final class PowerManagerService extends SystemService
     private SettingsObserver mSettingsObserver;
     private DreamManagerInternal mDreamManager;
     private LogicalLight mAttentionLight;
+    private LogicalLight mButtonsLight;
+    private LogicalLight mKeyboardLight;
+
+    private int mButtonTimeout;
+    private float mButtonBrightness;
+    private boolean mKeyboardVisible;
+    private float mKeyboardBrightness;
+
+    private boolean mButtonLightOnKeypressOnly;
 
     private final InattentiveSleepWarningController mInattentiveSleepWarningOverlayController;
     private final AmbientDisplaySuppressionController mAmbientDisplaySuppressionController;
@@ -506,6 +529,9 @@ public final class PowerManagerService extends SystemService
     // True if the device should wake up when plugged or unplugged.
     private boolean mWakeUpWhenPluggedOrUnpluggedConfig;
 
+    // True if the device should wake up when plugged or unplugged
+    private boolean mWakeUpWhenPluggedOrUnpluggedSetting;
+
     // True if the device should wake up when plugged or unplugged in theater mode.
     private boolean mWakeUpWhenPluggedOrUnpluggedInTheaterModeConfig;
 
@@ -614,6 +640,10 @@ public final class PowerManagerService extends SystemService
     // (when {@link #mProximityPositive} is set to false).
     private boolean mInterceptedPowerKeyForProximity;
 
+    // Button and keyboard brightness
+    public final float mButtonBrightnessDefault;
+    public final float mKeyboardBrightnessDefault;
+
     // Screen brightness setting limits.
     public final float mScreenBrightnessMinimum;
     public final float mScreenBrightnessMaximum;
@@ -624,6 +654,11 @@ public final class PowerManagerService extends SystemService
     @VisibleForTesting
     boolean mIsFaceDown = false;
     private long mLastFlipTime = 0L;
+
+    // The button brightness setting override from the window manager
+    // to allow the current foreground activity to override the button brightness.
+    private float mButtonBrightnessOverrideFromWindowManager =
+            PowerManager.BRIGHTNESS_INVALID_FLOAT;
 
     // The window manager has determined the user to be inactive via other means.
     // Set this to false to disable.
@@ -1159,6 +1194,19 @@ public final class PowerManagerService extends SystemService
     private static native boolean nativeSetPowerMode(int mode, boolean enabled);
     private static native boolean nativeForceSuspend();
 
+    private boolean mForceNavbar;
+
+    // Whether proximity check on wake is enabled by default
+    private boolean mProximityWakeEnabledByDefaultConfig;
+
+    private boolean mProximityWakeSupported;
+    private boolean mProximityWakeEnabled;
+    private int mProximityTimeOut;
+    private SensorManager mSensorManager;
+    private Sensor mProximitySensor;
+    private SensorEventListener mProximityListener;
+    private PowerManager.WakeLock mProximityWakeLock;
+
     public PowerManagerService(Context context) {
         this(context, new Injector());
     }
@@ -1209,6 +1257,13 @@ public final class PowerManagerService extends SystemService
 
         mUseAutoSuspend = mContext.getResources().getBoolean(com.android.internal.R.bool
                 .config_useAutoSuspend);
+
+        mButtonBrightnessDefault = mContext.getResources().getFloat(
+                org.lineageos.platform.internal.R.dimen
+                        .config_buttonBrightnessSettingDefaultFloat);
+        mKeyboardBrightnessDefault = mContext.getResources().getFloat(
+                org.lineageos.platform.internal.R.dimen
+                        .config_keyboardBrightnessSettingDefaultFloat);
 
         // Save brightness values:
         // Get float values from config.
@@ -1387,6 +1442,8 @@ public final class PowerManagerService extends SystemService
 
             mLightsManager = getLocalService(LightsManager.class);
             mAttentionLight = mLightsManager.getLight(LightsManager.LIGHT_ID_ATTENTION);
+            mButtonsLight = mLightsManager.getLight(LightsManager.LIGHT_ID_BUTTONS);
+            mKeyboardLight = mLightsManager.getLight(LightsManager.LIGHT_ID_KEYBOARD);
             updateDeviceConfigLocked();
             mDeviceConfigProvider.addOnPropertiesChangedListener(BackgroundThread.getExecutor(),
                     properties -> {
@@ -1409,6 +1466,10 @@ public final class PowerManagerService extends SystemService
             } catch (RemoteException e) {
                 // Shouldn't happen since in-process.
             }
+
+            // Initialize proximity sensor
+            mSensorManager = mContext.getSystemService(SensorManager.class);
+            mProximitySensor = mSensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY);
 
             mLowPowerStandbyController.systemReady();
 
@@ -1476,6 +1537,29 @@ public final class PowerManagerService extends SystemService
         resolver.registerContentObserver(Settings.Global.getUriFor(
                 Settings.Global.DEVICE_DEMO_MODE),
                 false, mSettingsObserver, UserHandle.USER_SYSTEM);
+
+        // Register for Lineage settings changes.
+        resolver.registerContentObserver(LineageSettings.System.getUriFor(
+                LineageSettings.System.PROXIMITY_ON_WAKE),
+                false, mSettingsObserver, UserHandle.USER_ALL);
+        resolver.registerContentObserver(LineageSettings.Global.getUriFor(
+                LineageSettings.Global.WAKE_WHEN_PLUGGED_OR_UNPLUGGED),
+                false, mSettingsObserver, UserHandle.USER_ALL);
+        resolver.registerContentObserver(LineageSettings.Secure.getUriFor(
+                LineageSettings.Secure.BUTTON_BRIGHTNESS),
+                false, mSettingsObserver, UserHandle.USER_ALL);
+        resolver.registerContentObserver(LineageSettings.Secure.getUriFor(
+                LineageSettings.Secure.BUTTON_BACKLIGHT_TIMEOUT),
+                false, mSettingsObserver, UserHandle.USER_ALL);
+        resolver.registerContentObserver(LineageSettings.System.getUriFor(
+                LineageSettings.System.BUTTON_BACKLIGHT_ONLY_WHEN_PRESSED),
+                false, mSettingsObserver, UserHandle.USER_ALL);
+        resolver.registerContentObserver(LineageSettings.Secure.getUriFor(
+                LineageSettings.Secure.KEYBOARD_BRIGHTNESS),
+                false, mSettingsObserver, UserHandle.USER_ALL);
+        resolver.registerContentObserver(LineageSettings.System.getUriFor(
+                LineageSettings.System.FORCE_SHOW_NAVBAR),
+                false, mSettingsObserver, UserHandle.USER_ALL);
 
         // Register for broadcasts from other components of the system.
         IntentFilter filter = new IntentFilter();
@@ -1546,6 +1630,17 @@ public final class PowerManagerService extends SystemService
                 com.android.internal.R.fraction.config_maximumScreenDimRatio, 1, 1);
         mSupportsDoubleTapWakeConfig = resources.getBoolean(
                 com.android.internal.R.bool.config_supportDoubleTapWake);
+
+        mProximityWakeSupported = resources.getBoolean(
+                org.lineageos.platform.internal.R.bool.config_proximityCheckOnWake);
+        mProximityWakeEnabledByDefaultConfig = resources.getBoolean(
+                org.lineageos.platform.internal.R.bool.config_proximityCheckOnWakeEnabledByDefault);
+        mProximityTimeOut = resources.getInteger(
+                org.lineageos.platform.internal.R.integer.config_proximityCheckTimeout);
+        if (mProximityWakeSupported) {
+            mProximityWakeLock = mContext.getSystemService(PowerManager.class)
+                    .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ProximityWakeLock");
+        }
     }
 
     @GuardedBy("mLock")
@@ -1577,6 +1672,9 @@ public final class PowerManagerService extends SystemService
                 Settings.Global.STAY_ON_WHILE_PLUGGED_IN, BatteryManager.BATTERY_PLUGGED_AC);
         mTheaterModeEnabled = Settings.Global.getInt(mContext.getContentResolver(),
                 Settings.Global.THEATER_MODE_ON, 0) == 1;
+        mWakeUpWhenPluggedOrUnpluggedSetting = LineageSettings.Global.getInt(resolver,
+                LineageSettings.Global.WAKE_WHEN_PLUGGED_OR_UNPLUGGED,
+                (mWakeUpWhenPluggedOrUnpluggedConfig ? 1 : 0)) == 1;
         mAlwaysOnEnabled = mAmbientDisplayConfiguration.alwaysOnEnabled(UserHandle.USER_CURRENT);
 
         if (mSupportsDoubleTapWakeConfig) {
@@ -1594,6 +1692,27 @@ public final class PowerManagerService extends SystemService
                 mSystemProperties.get(SYSTEM_PROPERTY_RETAIL_DEMO_ENABLED, null))) {
             mSystemProperties.set(SYSTEM_PROPERTY_RETAIL_DEMO_ENABLED, retailDemoValue);
         }
+
+        mProximityWakeEnabled = LineageSettings.System.getInt(resolver,
+                LineageSettings.System.PROXIMITY_ON_WAKE,
+                mProximityWakeEnabledByDefaultConfig ? 1 : 0) == 1;
+
+        mButtonTimeout = LineageSettings.Secure.getIntForUser(resolver,
+                LineageSettings.Secure.BUTTON_BACKLIGHT_TIMEOUT,
+                DEFAULT_BUTTON_ON_DURATION, UserHandle.USER_CURRENT);
+        mButtonBrightness = LineageSettings.Secure.getFloatForUser(resolver,
+                LineageSettings.Secure.BUTTON_BRIGHTNESS, mButtonBrightnessDefault,
+                UserHandle.USER_CURRENT);
+        mButtonLightOnKeypressOnly = LineageSettings.System.getIntForUser(resolver,
+                LineageSettings.System.BUTTON_BACKLIGHT_ONLY_WHEN_PRESSED,
+                0, UserHandle.USER_CURRENT) == 1;
+        mKeyboardBrightness = LineageSettings.Secure.getFloatForUser(resolver,
+                LineageSettings.Secure.KEYBOARD_BRIGHTNESS, mKeyboardBrightnessDefault,
+                UserHandle.USER_CURRENT);
+
+        mForceNavbar = LineageSettings.System.getIntForUser(resolver,
+                LineageSettings.System.FORCE_SHOW_NAVBAR,
+                0, UserHandle.USER_CURRENT) == 1;
 
         mDirty |= DIRTY_SETTINGS;
     }
@@ -2173,6 +2292,14 @@ public final class PowerManagerService extends SystemService
                 }
             } else {
                 if (eventTime > powerGroup.getLastUserActivityTimeLocked()) {
+                    powerGroup.setButtonPressedLocked(
+                            event == PowerManager.USER_ACTIVITY_EVENT_BUTTON);
+                    if (eventTime == powerGroup.getLastWakeTimeLocked() ||
+                            (mButtonLightOnKeypressOnly && powerGroup.getButtonPressedLocked() &&
+                            (flags & PowerManager.USER_ACTIVITY_FLAG_NO_BUTTON_LIGHTS) == 0)) {
+                        powerGroup.setButtonPressedLocked(true);
+                        powerGroup.setLastButtonActivityTimeLocked(eventTime);
+                    }
                     powerGroup.setLastUserActivityTimeLocked(eventTime, event);
                     mDirty |= DIRTY_USER_ACTIVITY;
                     if (event == PowerManager.USER_ACTIVITY_EVENT_BUTTON) {
@@ -2668,6 +2795,12 @@ public final class PowerManagerService extends SystemService
                     if (mIsPowered && !BatteryManager.isPlugWired(oldPlugType)
                             && BatteryManager.isPlugWired(mPlugType)) {
                         mNotifier.onWiredChargingStarted(mUserId);
+                    } else if (wasPowered && !mIsPowered) {
+                        if (oldPlugType == BatteryManager.BATTERY_PLUGGED_WIRELESS) {
+                            mNotifier.onWirelessChargingInterrupted(mUserId);
+                        } else {
+                            mNotifier.onWiredChargingDisconnected(mUserId);
+                        }
                     } else if (dockedOnWirelessCharger) {
                         mNotifier.onWirelessChargingStarted(mBatteryLevel, mUserId);
                     }
@@ -2685,7 +2818,7 @@ public final class PowerManagerService extends SystemService
     private boolean shouldWakeUpWhenPluggedOrUnpluggedLocked(
             boolean wasPowered, int oldPlugType, boolean dockedOnWirelessCharger) {
         // Don't wake when powered unless configured to do so.
-        if (!mWakeUpWhenPluggedOrUnpluggedConfig) {
+        if (!mWakeUpWhenPluggedOrUnpluggedSetting) {
             return false;
         }
 
@@ -3007,10 +3140,80 @@ public final class PowerManagerService extends SystemService
                     groupNextTimeout = lastUserActivityTime + screenOffTimeout - screenDimDuration;
                     if (now < groupNextTimeout) {
                         groupUserActivitySummary = USER_ACTIVITY_SCREEN_BRIGHT;
+                        if (wakefulness == WAKEFULNESS_AWAKE) {
+                            if (mButtonsLight != null) {
+                                float buttonBrightness = BRIGHTNESS_OFF_FLOAT;
+                                if (!mForceNavbar) {
+                                    if (isValidBrightness(
+                                            mButtonBrightnessOverrideFromWindowManager)) {
+                                        if (mButtonBrightnessOverrideFromWindowManager >
+                                                PowerManager.BRIGHTNESS_MIN) {
+                                            buttonBrightness =
+                                                    mButtonBrightnessOverrideFromWindowManager;
+                                        }
+                                    } else if (isValidButtonBrightness(mButtonBrightness)) {
+                                        buttonBrightness = mButtonBrightness;
+                                    }
+                                }
+
+                                if (!mButtonLightOnKeypressOnly) {
+                                    powerGroup.setLastButtonActivityTimeLocked(
+                                            lastUserActivityTime);
+                                }
+                                final long lastButtonActivityTimeout = mButtonTimeout +
+                                        powerGroup.getLastButtonActivityTimeLocked();
+
+                                if (mButtonTimeout != 0 && now > lastButtonActivityTimeout) {
+                                    mButtonsLight.setBrightness(BRIGHTNESS_OFF_FLOAT);
+                                    powerGroup.setButtonOnLocked(false);
+                                } else {
+                                    if (!mProximityPositive && (!mButtonLightOnKeypressOnly ||
+                                            powerGroup.getButtonPressedLocked())) {
+                                        mButtonsLight.setBrightness(buttonBrightness);
+                                        powerGroup.setButtonPressedLocked(false);
+                                        if (buttonBrightness != BRIGHTNESS_OFF_FLOAT &&
+                                                mButtonTimeout != 0) {
+                                            powerGroup.setButtonOnLocked(true);
+                                            if (now + mButtonTimeout < nextTimeout) {
+                                                groupNextTimeout = now + mButtonTimeout;
+                                            }
+                                        }
+                                    } else if (mButtonLightOnKeypressOnly &&
+                                            lastButtonActivityTimeout < nextTimeout &&
+                                            powerGroup.getButtonOnLocked()) {
+                                        groupNextTimeout = lastButtonActivityTimeout;
+                                    }
+                                }
+                            }
+
+                            if (mKeyboardLight != null) {
+                                float keyboardBrightness = BRIGHTNESS_OFF_FLOAT;
+                                if (isValidBrightness(mButtonBrightnessOverrideFromWindowManager)) {
+                                    if (mButtonBrightnessOverrideFromWindowManager >
+                                            PowerManager.BRIGHTNESS_MIN) {
+                                        keyboardBrightness =
+                                                mButtonBrightnessOverrideFromWindowManager;
+                                    }
+                                } else if (isValidKeyboardBrightness(mKeyboardBrightness)) {
+                                    keyboardBrightness = mKeyboardBrightness;
+                                }
+                                mKeyboardLight.setBrightness(mKeyboardVisible ?
+                                        keyboardBrightness : BRIGHTNESS_OFF_FLOAT);
+                            }
+                        }
                     } else {
                         groupNextTimeout = lastUserActivityTime + screenOffTimeout;
                         if (now < groupNextTimeout) {
                             groupUserActivitySummary = USER_ACTIVITY_SCREEN_DIM;
+                            if (wakefulness == WAKEFULNESS_AWAKE) {
+                                if (mButtonsLight != null) {
+                                    mButtonsLight.setBrightness(BRIGHTNESS_OFF_FLOAT);
+                                    powerGroup.setButtonOnLocked(false);
+                                }
+                                if (mKeyboardLight != null) {
+                                    mKeyboardLight.setBrightness(BRIGHTNESS_OFF_FLOAT);
+                                }
+                            }
                         }
                     }
                 }
@@ -3743,6 +3946,14 @@ public final class PowerManagerService extends SystemService
         return value >= PowerManager.BRIGHTNESS_MIN && value <= PowerManager.BRIGHTNESS_MAX;
     }
 
+    private static boolean isValidButtonBrightness(float value) {
+        return value > PowerManager.BRIGHTNESS_MIN && value <= PowerManager.BRIGHTNESS_MAX;
+    }
+
+    private static boolean isValidKeyboardBrightness(float value) {
+        return value > PowerManager.BRIGHTNESS_MIN && value <= PowerManager.BRIGHTNESS_MAX;
+    }
+
     @VisibleForTesting
     int getDreamsBatteryLevelDrain() {
         return mDreamsBatteryLevelDrain;
@@ -4028,7 +4239,7 @@ public final class PowerManagerService extends SystemService
     }
 
     private void shutdownOrRebootInternal(final @HaltMode int haltMode, final boolean confirm,
-            @Nullable final String reason, boolean wait) {
+            @Nullable final String reason, boolean wait, boolean custom) {
         if (PowerManager.REBOOT_USERSPACE.equals(reason)) {
             if (!PowerManager.isRebootingUserspaceSupportedImpl()) {
                 throw new UnsupportedOperationException(
@@ -4054,7 +4265,11 @@ public final class PowerManagerService extends SystemService
                     if (haltMode == HALT_MODE_REBOOT_SAFE_MODE) {
                         ShutdownThread.rebootSafeMode(getUiContext(), confirm);
                     } else if (haltMode == HALT_MODE_REBOOT) {
-                        ShutdownThread.reboot(getUiContext(), reason, confirm);
+                        if (custom) {
+                            ShutdownThread.rebootCustom(getUiContext(), reason, confirm);
+                        } else {
+                            ShutdownThread.reboot(getUiContext(), reason, confirm);
+                        }
                     } else {
                         ShutdownThread.shutdown(getUiContext(), reason, confirm);
                     }
@@ -4439,6 +4654,17 @@ public final class PowerManagerService extends SystemService
         }
     }
 
+    private void setButtonBrightnessOverrideFromWindowManagerInternal(float brightness) {
+        synchronized (mLock) {
+            if (!BrightnessSynchronizer.floatEquals(mButtonBrightnessOverrideFromWindowManager,
+                    brightness)) {
+                mButtonBrightnessOverrideFromWindowManager = brightness;
+                mDirty |= DIRTY_SETTINGS;
+                updatePowerStateLocked();
+            }
+        }
+    }
+
     private void setUserInactiveOverrideFromWindowManagerInternal() {
         synchronized (mLock) {
             mUserInactiveOverrideFromWindowManager = true;
@@ -4777,6 +5003,11 @@ public final class PowerManagerService extends SystemService
                     + mMaximumScreenOffTimeoutFromDeviceAdmin + " (enforced="
                     + isMaximumScreenOffTimeoutFromDeviceAdminEnforcedLocked() + ")");
             pw.println("  mStayOnWhilePluggedInSetting=" + mStayOnWhilePluggedInSetting);
+            pw.println("  mButtonTimeout=" + mButtonTimeout);
+            pw.println("  mButtonBrightness=" + mButtonBrightness);
+            pw.println("  mButtonBrightnessOverrideFromWindowManager="
+                    + mButtonBrightnessOverrideFromWindowManager);
+            pw.println("  mKeyboardBrightness=" + mKeyboardBrightness);
             pw.println("  mUserActivityTimeoutOverrideFromWindowManager="
                     + mUserActivityTimeoutOverrideFromWindowManager);
             pw.println("  mUserInactiveOverrideFromWindowManager="
@@ -5370,6 +5601,10 @@ public final class PowerManagerService extends SystemService
                     break;
                 case MSG_RELEASE_ALL_OVERRIDE_WAKE_LOCKS:
                     releaseAllOverrideWakeLocks(msg.arg1);
+                    break;
+                case MSG_WAKE_UP:
+                    cleanupProximity();
+                    ((Runnable) msg.obj).run();
                     break;
             }
 
@@ -6020,12 +6255,24 @@ public final class PowerManagerService extends SystemService
         @Override // Binder call
         public void wakeUp(long eventTime, @WakeReason int reason, String details,
                 String opPackageName) {
-            wakeUpWithDisplayId(eventTime, reason, details, opPackageName, Display.DEFAULT_DISPLAY);
+            wakeUpWithDisplayId(eventTime, reason, details, opPackageName, Display.DEFAULT_DISPLAY,
+                false);
+        }
+
+        @Override // Binder call
+        public void wakeUpWithProximityCheck(long eventTime, @WakeReason int reason,
+                String details, String opPackageName, int displayId) {
+            wakeUpWithDisplayId(eventTime, reason, details, opPackageName, displayId, true);
         }
 
         @Override // Binder call
         public void wakeUpWithDisplayId(long eventTime, @WakeReason int reason, String details,
                 String opPackageName, int displayId) {
+            wakeUpWithDisplayId(eventTime, reason, details, opPackageName, displayId, false);
+        }
+
+        public void wakeUpWithDisplayId(long eventTime, @WakeReason int reason, String details,
+                String opPackageName, int displayId, boolean checkProximity) {
             final long now = mClock.uptimeMillis();
             if (eventTime > now) {
                 Slog.e(TAG, "Event time " + eventTime + " cannot be newer than " + now);
@@ -6036,20 +6283,27 @@ public final class PowerManagerService extends SystemService
                     android.Manifest.permission.DEVICE_POWER, null);
 
             final int uid = Binder.getCallingUid();
-            final long ident = Binder.clearCallingIdentity();
-            try {
-                int displayGroupId = getDisplayGroupId(displayId);
-                synchronized (mLock) {
-                    if (!mBootCompleted && sQuiescent) {
-                        mDirty |= DIRTY_QUIESCENT;
-                        updatePowerStateLocked();
-                        return;
+            final Runnable r = () -> {
+                final long ident = Binder.clearCallingIdentity();
+                try {
+                    int displayGroupId = getDisplayGroupId(displayId);
+                    synchronized (mLock) {
+                        if (!mBootCompleted && sQuiescent) {
+                            mDirty |= DIRTY_QUIESCENT;
+                            updatePowerStateLocked();
+                            return;
+                        }
+                        wakePowerGroupLocked(mPowerGroups.get(displayGroupId), eventTime,
+                                reason, details, uid, opPackageName, uid);
                     }
-                    wakePowerGroupLocked(mPowerGroups.get(displayGroupId), eventTime,
-                            reason, details, uid, opPackageName, uid);
+                } finally {
+                    Binder.restoreCallingIdentity(ident);
                 }
-            } finally {
-                Binder.restoreCallingIdentity(ident);
+            };
+            if (checkProximity) {
+                runWithProximityCheck(r);
+            } else {
+                r.run();
             }
         }
 
@@ -6121,6 +6375,10 @@ public final class PowerManagerService extends SystemService
                     return android.companion.virtualdevice.flags.Flags.deviceAwareDisplayPower()
                             && info != null && isValidBrightnessValue(info.brightnessDim)
                             ? info.brightnessDim : mScreenBrightnessDim;
+                case PowerManager.BRIGHTNESS_CONSTRAINT_TYPE_DEFAULT_BUTTON:
+                    return mButtonBrightnessDefault;
+                case PowerManager.BRIGHTNESS_CONSTRAINT_TYPE_DEFAULT_KEYBOARD:
+                    return mKeyboardBrightnessDefault;
                 default:
                     return PowerManager.BRIGHTNESS_INVALID_FLOAT;
             }
@@ -6695,7 +6953,7 @@ public final class PowerManagerService extends SystemService
             ShutdownCheckPoints.recordCheckPoint(Binder.getCallingPid(), reason);
             final long ident = Binder.clearCallingIdentity();
             try {
-                shutdownOrRebootInternal(HALT_MODE_REBOOT, confirm, reason, wait);
+                shutdownOrRebootInternal(HALT_MODE_REBOOT, confirm, reason, wait, false);
             } finally {
                 Binder.restoreCallingIdentity(ident);
             }
@@ -6715,7 +6973,29 @@ public final class PowerManagerService extends SystemService
             ShutdownCheckPoints.recordCheckPoint(Binder.getCallingPid(), reason);
             final long ident = Binder.clearCallingIdentity();
             try {
-                shutdownOrRebootInternal(HALT_MODE_REBOOT_SAFE_MODE, confirm, reason, wait);
+                shutdownOrRebootInternal(HALT_MODE_REBOOT_SAFE_MODE, confirm, reason, wait, false);
+            } finally {
+                Binder.restoreCallingIdentity(ident);
+            }
+        }
+
+        /**
+         * Reboots the device.
+         *
+         * @param confirm If true, shows a reboot confirmation dialog.
+         * @param reason The reason for the reboot, or null if none.
+         * @param wait If true, this call waits for the reboot to complete and does not return.
+         */
+        @Override // Binder call
+        public void rebootCustom(boolean confirm, String reason, boolean wait) {
+            mContext.enforceCallingOrSelfPermission(android.Manifest.permission.REBOOT, null);
+            if (PowerManager.REBOOT_RECOVERY.equals(reason)) {
+                mContext.enforceCallingOrSelfPermission(android.Manifest.permission.RECOVERY, null);
+            }
+
+            final long ident = Binder.clearCallingIdentity();
+            try {
+                shutdownOrRebootInternal(HALT_MODE_REBOOT, confirm, reason, wait, true);
             } finally {
                 Binder.restoreCallingIdentity(ident);
             }
@@ -6734,7 +7014,7 @@ public final class PowerManagerService extends SystemService
             ShutdownCheckPoints.recordCheckPoint(Binder.getCallingPid(), reason);
             final long ident = Binder.clearCallingIdentity();
             try {
-                shutdownOrRebootInternal(HALT_MODE_SHUTDOWN, confirm, reason, wait);
+                shutdownOrRebootInternal(HALT_MODE_SHUTDOWN, confirm, reason, wait, false);
             } finally {
                 Binder.restoreCallingIdentity(ident);
             }
@@ -6803,6 +7083,22 @@ public final class PowerManagerService extends SystemService
                 setAttentionLightInternal(on, color);
             } finally {
                 Binder.restoreCallingIdentity(ident);
+            }
+        }
+
+        @Override // Binder call
+        public void setKeyboardVisibility(boolean visible) {
+            synchronized (mLock) {
+                if (DEBUG_SPEW) {
+                    Slog.d(TAG, "setKeyboardVisibility: " + visible);
+                }
+                if (mKeyboardVisible != visible) {
+                    mKeyboardVisible = visible;
+                    synchronized (mLock) {
+                        mDirty |= DIRTY_USER_ACTIVITY;
+                        updatePowerStateLocked();
+                    }
+                }
             }
         }
 
@@ -7117,6 +7413,18 @@ public final class PowerManagerService extends SystemService
     @VisibleForTesting
     final class LocalService extends PowerManagerInternal {
         @Override
+        public void setButtonBrightnessOverrideFromWindowManager(float screenBrightness) {
+            mContext.enforceCallingOrSelfPermission(android.Manifest.permission.DEVICE_POWER, null);
+
+            final long ident = Binder.clearCallingIdentity();
+            try {
+                setButtonBrightnessOverrideFromWindowManagerInternal(screenBrightness);
+            } finally {
+                Binder.restoreCallingIdentity(ident);
+            }
+        }
+
+        @Override
         public void setDozeOverrideFromDreamManager(
                 int screenState, int reason, float screenBrightnessFloat, int screenBrightnessInt,
                 boolean useNormalBrightnessForDoze) {
@@ -7343,5 +7651,77 @@ public final class PowerManagerService extends SystemService
             return Display.INVALID_DISPLAY_GROUP;
         }
         return displayInfo.displayGroupId;
+    }
+
+    private void cleanupProximity() {
+        synchronized (mProximityWakeLock) {
+            cleanupProximityLocked();
+        }
+    }
+
+    private void cleanupProximityLocked() {
+        if (mProximityWakeLock.isHeld()) {
+            mProximityWakeLock.release();
+        }
+        if (mProximityListener != null) {
+            mSensorManager.unregisterListener(mProximityListener);
+            mProximityListener = null;
+        }
+    }
+
+    private void runWithProximityCheck(final Runnable r) {
+        if (mHandler.hasMessages(MSG_WAKE_UP)) {
+            // A message is already queued
+            return;
+        }
+
+        final TelephonyManager tm = mContext.getSystemService(TelephonyManager.class);
+        final boolean hasIncomingCall = tm.getCallState() == TelephonyManager.CALL_STATE_RINGING;
+
+        if (mProximityWakeSupported && mProximityWakeEnabled
+                && mProximitySensor != null && !hasIncomingCall) {
+            final Message msg = mHandler.obtainMessage(MSG_WAKE_UP);
+            msg.obj = r;
+            mHandler.sendMessageDelayed(msg, mProximityTimeOut);
+            runPostProximityCheck(r);
+        } else {
+            r.run();
+        }
+    }
+
+    private void runPostProximityCheck(final Runnable r) {
+        if (mSensorManager == null) {
+            r.run();
+            return;
+        }
+        synchronized (mProximityWakeLock) {
+            mProximityWakeLock.acquire();
+            mProximityListener = new SensorEventListener() {
+                @Override
+                public void onSensorChanged(SensorEvent event) {
+                    cleanupProximityLocked();
+                    if (!mHandler.hasMessages(MSG_WAKE_UP)) {
+                        Slog.w(TAG, "Proximity sensor took too long, "
+                                + "wake event already triggered!");
+                        return;
+                    }
+                    mHandler.removeMessages(MSG_WAKE_UP);
+                    final float distance = event.values[0];
+                    if (distance >= PROXIMITY_NEAR_THRESHOLD ||
+                            distance >= mProximitySensor.getMaximumRange()) {
+                        r.run();
+                    } else {
+                        Slog.w(TAG, "Not waking up. Proximity sensor is blocked.");
+                    }
+                }
+
+                @Override
+                public void onAccuracyChanged(Sensor sensor, int accuracy) {
+                    // Do nothing
+                }
+            };
+            mSensorManager.registerListener(mProximityListener,
+                   mProximitySensor, SensorManager.SENSOR_DELAY_FASTEST);
+        }
     }
 }

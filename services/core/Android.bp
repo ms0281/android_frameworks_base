@@ -167,6 +167,7 @@ java_library_static {
         "service-rkp.stubs.system_server",
         "service-sdksandbox.stubs.system_server",
         "device_policy_aconfig_flags_lib",
+        "org.lineageos.platform.internal",
     ],
     plugins: ["ImmutabilityAnnotationProcessor"],
 
@@ -216,8 +217,8 @@ java_library_static {
         "icu4j_calendar_astronomer",
         "android.security.aaid_aidl-java",
         "netd-client",
+        "motorola.hardware.health-V1.0-java",
         "overlayable_policy_aidl-java",
-        "SurfaceFlingerProperties",
         "com.android.sysprop.watchdog",
         "securebox",
         "apache-commons-math",

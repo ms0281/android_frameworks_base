@@ -254,6 +254,8 @@ import com.android.server.utils.WatchedSparseBooleanArray;
 import com.android.server.utils.WatchedSparseIntArray;
 import com.android.server.utils.Watcher;
 
+import com.nvidia.NvAppProfileService;
+
 import dalvik.system.VMRuntime;
 
 import libcore.util.EmptyArray;
@@ -809,6 +811,9 @@ public class PackageManagerService implements PackageSender, TestUtilityService 
     final SparseArray<VerifyingSession> mPendingEnableRollback = new SparseArray<>();
 
     final PackageInstallerService mInstallerService;
+
+    private NvAppProfileService mAppProfileService;
+
     final ArtManagerService mArtManagerService;
 
     // TODO(b/260124949): Remove these.
@@ -2239,7 +2244,8 @@ public class PackageManagerService implements PackageSender, TestUtilityService 
             if (mIsUpgrade) {
                 PackageManagerServiceUtils.logCriticalInfo(Log.INFO,
                         "Upgrading from " + ver.fingerprint + " (" + ver.buildFingerprint + ") to "
-                                + PackagePartitions.FINGERPRINT + " (" + Build.FINGERPRINT + ")");
+                                + PackagePartitions.FINGERPRINT
+                                + " (" + Build.VERSION.INCREMENTAL + ")");
             }
             mPriorSdkVersion = mIsUpgrade ? ver.sdkVersion : -1;
             mInitAppsHelper = new InitAppsHelper(this, mApexManager, mInstallPackageHelper,
@@ -2397,7 +2403,7 @@ public class PackageManagerService implements PackageSender, TestUtilityService 
                                         | Installer.FLAG_CLEAR_APP_DATA_KEEP_ART_PROFILES);
                     }
                 }
-                ver.buildFingerprint = Build.FINGERPRINT;
+                ver.buildFingerprint = Build.VERSION.INCREMENTAL;
                 ver.fingerprint = PackagePartitions.FINGERPRINT;
             }
 
@@ -4282,7 +4288,7 @@ public class PackageManagerService implements PackageSender, TestUtilityService 
             final int userId = livingUsers.get(i).id;
             final boolean isPermissionUpgradeNeeded = !Objects.equals(
                     mPermissionManager.getDefaultPermissionGrantFingerprint(userId),
-                    Build.FINGERPRINT);
+                    Build.VERSION.INCREMENTAL);
             if (isPermissionUpgradeNeeded) {
                 grantPermissionsUserIds = ArrayUtils.appendInt(
                         grantPermissionsUserIds, userId);
@@ -4291,7 +4297,8 @@ public class PackageManagerService implements PackageSender, TestUtilityService 
         // If we upgraded grant all default permissions before kicking off.
         for (int userId : grantPermissionsUserIds) {
             mLegacyPermissionManager.grantDefaultPermissions(userId);
-            mPermissionManager.setDefaultPermissionGrantFingerprint(Build.FINGERPRINT, userId);
+            mPermissionManager.setDefaultPermissionGrantFingerprint(
+                    Build.VERSION.INCREMENTAL, userId);
         }
         if (grantPermissionsUserIds == EMPTY_INT_ARRAY) {
             // If we did not grant default permissions, we preload from this the
@@ -4477,7 +4484,8 @@ public class PackageManagerService implements PackageSender, TestUtilityService 
         if (!convertedFromPreCreated || !readPermissionStateForUser(userId)) {
             mPermissionManager.onUserCreated(userId);
             mLegacyPermissionManager.grantDefaultPermissions(userId);
-            mPermissionManager.setDefaultPermissionGrantFingerprint(Build.FINGERPRINT, userId);
+            mPermissionManager.setDefaultPermissionGrantFingerprint(
+                    Build.VERSION.INCREMENTAL, userId);
             mDomainVerificationManager.clearUser(userId);
         }
     }
@@ -4489,7 +4497,7 @@ public class PackageManagerService implements PackageSender, TestUtilityService 
             mPermissionManager.readLegacyPermissionStateTEMP();
             final boolean isPermissionUpgradeNeeded = !Objects.equals(
                     mPermissionManager.getDefaultPermissionGrantFingerprint(userId),
-                    Build.FINGERPRINT);
+                    Build.VERSION.INCREMENTAL);
             return isPermissionUpgradeNeeded;
         }
     }

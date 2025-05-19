@@ -101,7 +101,11 @@ import com.android.server.display.utils.SensorUtils;
 import com.android.server.display.whitebalance.DisplayWhiteBalanceController;
 import com.android.server.display.whitebalance.DisplayWhiteBalanceFactory;
 import com.android.server.display.whitebalance.DisplayWhiteBalanceSettings;
+import com.android.server.lights.LightsManager;
+import com.android.server.lights.LogicalLight;
 import com.android.server.policy.WindowManagerPolicy;
+
+import lineageos.providers.LineageSettings;
 
 import java.io.PrintWriter;
 import java.util.Objects;
@@ -250,6 +254,9 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
     // Battery stats.
     @Nullable
     private final IBatteryStats mBatteryStats;
+
+    // The lights manager.
+    private final LightsManager mLights;
 
     // The sensor manager.
     private final SensorManager mSensorManager;
@@ -545,6 +552,7 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
         mThermalBrightnessThrottlingDataId =
                 logicalDisplay.getDisplayInfoLocked().thermalBrightnessThrottlingDataId;
 
+        mLights = LocalServices.getService(LightsManager.class);
         mUniqueDisplayId = mDisplayDevice.getUniqueId();
         mDisplayStatsId = mUniqueDisplayId.hashCode();
         mPhysicalDisplayName = mDisplayDevice.getNameLocked();
@@ -1071,6 +1079,9 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
                     Settings.System.getUriFor(Settings.System.SCREEN_BRIGHTNESS_FOR_ALS),
                     /* notifyForDescendants= */ false, mSettingsObserver, UserHandle.USER_ALL);
         }
+        mContext.getContentResolver().registerContentObserver(
+                LineageSettings.System.getUriFor(LineageSettings.System.AUTO_BRIGHTNESS_ONE_SHOT),
+                false /*notifyForDescendants*/, mSettingsObserver, UserHandle.USER_ALL);
         handleBrightnessModeChange();
     }
 
@@ -1400,6 +1411,19 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
                 state, /* reason= */ stateAndReason.second,
                 mDisplayStateController.shouldPerformScreenOffTransition());
         state = mPowerState.getScreenState();
+
+        // Disable button and keyboard lights when screen off or dozing
+        if (state == Display.STATE_OFF || state == Display.STATE_DOZE ||
+                state == Display.STATE_DOZE_SUSPEND) {
+            LogicalLight buttonsLight = mLights.getLight(LightsManager.LIGHT_ID_BUTTONS);
+            if (buttonsLight != null) {
+                buttonsLight.setBrightness(PowerManager.BRIGHTNESS_OFF_FLOAT);
+            }
+            LogicalLight keyboardLight = mLights.getLight(LightsManager.LIGHT_ID_KEYBOARD);
+            if (keyboardLight != null) {
+                keyboardLight.setBrightness(PowerManager.BRIGHTNESS_OFF_FLOAT);
+            }
+        }
 
         // Use doze brightness if one of following is true:
         // 1. The target `state` isDozeState.
@@ -2527,6 +2551,8 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
                 .setPendingScreenBrightness(mDisplayBrightnessController
                         .getScreenBrightnessSetting());
         mAutomaticBrightnessStrategy.updatePendingAutoBrightnessAdjustments();
+        mAutomaticBrightnessStrategy.setAutoBrightnessOneShotEnabled(
+                getAutoBrightnessOneShotSetting());
         sendUpdatePowerState();
     }
 
@@ -2542,6 +2568,12 @@ final class DisplayPowerController implements AutomaticBrightnessController.Call
             // In manual mode, all brightness changes should be saved immediately.
             mDisplayBrightnessController.saveBrightnessIfNeeded();
         }
+    }
+
+    private boolean getAutoBrightnessOneShotSetting() {
+        return LineageSettings.System.getIntForUser(
+                mContext.getContentResolver(), LineageSettings.System.AUTO_BRIGHTNESS_ONE_SHOT,
+                0, UserHandle.USER_CURRENT) == 1;
     }
 
     public float getScreenBrightnessSetting() {

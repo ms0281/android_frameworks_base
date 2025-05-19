@@ -1445,28 +1445,9 @@ public class NavigationBar extends ViewController<NavigationBarView> implements 
         if (!mView.isRecentsButtonVisible() && mScreenPinningActive) {
             return onLongPressBackHome(v);
         }
-        if (shouldDisableNavbarGestures()) {
-            return false;
-        }
-        mMetricsLogger.action(MetricsEvent.ACTION_ASSIST_LONG_PRESS);
-        mUiEventLogger.log(NavBarActionEvent.NAVBAR_ASSIST_LONGPRESS);
-        Bundle args = new Bundle();
-        args.putInt(
-                AssistManager.INVOCATION_TYPE_KEY,
-                AssistManager.INVOCATION_TYPE_HOME_BUTTON_LONG_PRESS);
-        // If Launcher has requested to override long press home, add a delay for the ripple.
-        // TODO(b/304146255): Remove this delay once we can exclude 3-button nav from screenshot.
-        boolean delayAssistInvocation = mAssistManagerLazy.get().shouldOverrideAssist(
-                AssistManager.INVOCATION_TYPE_HOME_BUTTON_LONG_PRESS);
-        // In practice, I think v should always be a KeyButtonView, but just being safe.
-        if (delayAssistInvocation && v instanceof KeyButtonView) {
-            ((KeyButtonView) v).setOnRippleInvisibleRunnable(
-                    () -> mAssistManagerLazy.get().startAssist(args));
-        } else {
-            mAssistManagerLazy.get().startAssist(args);
-        }
-        mCentralSurfacesOptionalLazy.get().ifPresent(CentralSurfaces::awakenDreams);
-        mView.abortCurrentGesture();
+        KeyButtonView keyButtonView = (KeyButtonView) v;
+        keyButtonView.sendEvent(KeyEvent.ACTION_DOWN, KeyEvent.FLAG_LONG_PRESS);
+        keyButtonView.sendAccessibilityEvent(AccessibilityEvent.TYPE_VIEW_LONG_CLICKED);
         return true;
     }
 
@@ -1578,10 +1559,15 @@ public class NavigationBar extends ViewController<NavigationBarView> implements 
                         // should stop lock task.
                         stopLockTaskMode = true;
                         return true;
-                    } else if (v.getId() == btnId2) {
-                        return btnId2 == R.id.recent_apps
-                                ? false
-                                : onHomeLongClick(mView.getHomeButton().getCurrentView());
+                    } else if (v.getId() == R.id.recent_apps) {
+                        // Send long press key event so that Lineage button handling can intercept
+                        KeyButtonView keyButtonView = (KeyButtonView) v;
+                        keyButtonView.sendEvent(KeyEvent.ACTION_DOWN, KeyEvent.FLAG_LONG_PRESS);
+                        keyButtonView.sendAccessibilityEvent(
+                                AccessibilityEvent.TYPE_VIEW_LONG_CLICKED);
+                        return true;
+                    } else {
+                        onHomeLongClick(mView.getHomeButton().getCurrentView());
                     }
                 }
             } finally {

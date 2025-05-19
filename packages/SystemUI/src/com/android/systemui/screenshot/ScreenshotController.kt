@@ -16,11 +16,13 @@
 package com.android.systemui.screenshot
 
 import android.animation.Animator
+import android.app.StatusBarManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Insets
@@ -49,6 +51,7 @@ import com.android.systemui.dagger.qualifiers.Main
 import com.android.systemui.res.R
 import com.android.systemui.screenshot.ActionIntentCreator.createLongScreenshotIntent
 import com.android.systemui.screenshot.ScreenshotShelfViewProxy.ScreenshotViewCallback
+import com.android.systemui.screenshot.scroll.ScrollCaptureController.BitmapScreenshot
 import com.android.systemui.screenshot.scroll.ScrollCaptureController.LongScreenshot
 import com.android.systemui.screenshot.scroll.ScrollCaptureExecutor
 import com.android.systemui.util.Assert
@@ -80,6 +83,8 @@ internal constructor(
     private val screenshotHandler: TimeoutHandler,
     private val broadcastSender: BroadcastSender,
     private val broadcastDispatcher: BroadcastDispatcher,
+    private val packageManager: PackageManager,
+    private val statusBarManager: StatusBarManager,
     private val userManager: UserManager,
     private val assistContentRequester: AssistContentRequester,
     private val messageContainerController: MessageContainerController,
@@ -103,6 +108,7 @@ internal constructor(
     private var screenshotTakenInPortrait = false
     private var screenshotAnimation: Animator? = null
     private var packageName = ""
+    private var packageLabel = ""
 
     /** Tracks config changes that require re-creating UI */
     private val configChanges =
@@ -161,6 +167,18 @@ internal constructor(
     ) {
         Assert.isMainThread()
         screenshotHandler.resetTimeout()
+
+        packageLabel = runCatching {
+            val info = packageManager.getApplicationInfo(screenshot.packageNameString, 0)
+            info.loadLabel(packageManager).toString()
+        }.getOrDefault("")
+        scrollCaptureExecutor.longScreenshotHolder.foregroundAppName = packageLabel
+
+        if (screenshot.type == WindowManager.TAKE_SCREENSHOT_SELECTED_REGION) {
+            startPartialScreenshotActivity(Process.myUserHandle())
+            finisher.accept(null)
+            return
+        }
 
         val currentBitmap = screenshot.bitmap
         if (currentBitmap == null) {
@@ -387,6 +405,21 @@ internal constructor(
         }
     }
 
+    private fun startPartialScreenshotActivity(owner: UserHandle) {
+        scrollCaptureExecutor.executeBatchScrollCapture(
+            BitmapScreenshot(context, imageCapture.captureDisplay(display.displayId, null)),
+            {
+                val intent = createLongScreenshotIntent(owner, context)
+                context.startActivity(intent)
+
+                statusBarManager.collapsePanels()
+            },
+            { _: Rect, onTransitionEnd: Runnable, _: LongScreenshot ->
+                onTransitionEnd.run()
+            },
+        )
+    }
+
     private fun onScrollButtonClicked(owner: UserHandle, response: ScrollCaptureResponse) {
         if (LogConfig.DEBUG_INPUT) {
             Log.d(TAG, "scroll chip tapped")
@@ -499,6 +532,7 @@ internal constructor(
                 screenshot.bitmap,
                 screenshot.userHandle,
                 display.displayId,
+                packageLabel,
             )
         future.addListener(
             {

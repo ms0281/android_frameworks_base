@@ -58,6 +58,7 @@ import android.os.Binder;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.IRemoteCallback;
 import android.os.Looper;
 import android.os.PatternMatcher;
 import android.os.Process;
@@ -71,6 +72,7 @@ import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.Surface;
+import android.view.ViewConfiguration;
 import android.view.accessibility.AccessibilityManager;
 import android.view.inputmethod.Flags;
 import android.view.inputmethod.InputMethodManager;
@@ -146,7 +148,6 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
     public static final String TAG_OPS = "OverviewProxyService";
     private static final long BACKOFF_MILLIS = 1000;
     private static final long DEFERRED_CALLBACK_MILLIS = 5000;
-
     // Max backoff caps at 5 mins
     private static final long MAX_BACKOFF_MILLIS = 10 * 60 * 1000;
 
@@ -183,6 +184,10 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
     private int mConnectionBackoffAttempts;
     private boolean mBound;
     private boolean mIsEnabled;
+    // This is set to false when the overview service is requested to be bound until it is notified
+    // that the previous service has been cleaned up in IOverviewProxy#onUnbind(). It is also set to
+    // true after a 1000ms timeout by mDeferredBindAfterTimedOutCleanup.
+    private boolean mIsPrevServiceCleanedUp = true;
 
     private boolean mIsSystemOrVisibleBgUser;
     private int mCurrentBoundedUserId = -1;
@@ -306,6 +311,25 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
         }
 
         @Override
+        public void injectLongPress(int keyCode) throws RemoteException {
+            verifyCallerAndClearCallingIdentityPostMain("longPressInjected", () -> {
+                sendEvent(KeyEvent.ACTION_DOWN, keyCode, 0, 0);
+                mHandler.postDelayed(() -> {
+                    sendEvent(KeyEvent.ACTION_DOWN, keyCode, 1, KeyEvent.FLAG_LONG_PRESS);
+                    sendEvent(KeyEvent.ACTION_UP, keyCode, 0, KeyEvent.FLAG_CANCELED);
+                }, ViewConfiguration.getLongPressTimeout());
+            });
+        }
+
+        @Override
+        public void injectPress(int keyCode) throws RemoteException {
+            verifyCallerAndClearCallingIdentityPostMain("pressInjected", () -> {
+                sendEvent(KeyEvent.ACTION_DOWN, keyCode);
+                sendEvent(KeyEvent.ACTION_UP, keyCode);
+            });
+        }
+
+        @Override
         public void onImeSwitcherPressed() {
             // TODO(b/204901476) We're intentionally using the default display for now since
             // Launcher/Taskbar isn't display aware.
@@ -359,16 +383,20 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
                     onTaskbarAutohideSuspend(suspend));
         }
 
-        private boolean sendEvent(int action, int code) {
+        private boolean sendEvent(int action, int code, int repeat, int flags) {
             long when = SystemClock.uptimeMillis();
-            final KeyEvent ev = new KeyEvent(when, when, action, code, 0 /* repeat */,
+            final KeyEvent ev = new KeyEvent(when, when, action, code, repeat,
                     0 /* metaState */, KeyCharacterMap.VIRTUAL_KEYBOARD, 0 /* scancode */,
-                    KeyEvent.FLAG_FROM_SYSTEM | KeyEvent.FLAG_VIRTUAL_HARD_KEY,
+                    flags | KeyEvent.FLAG_FROM_SYSTEM | KeyEvent.FLAG_VIRTUAL_HARD_KEY,
                     InputDevice.SOURCE_KEYBOARD);
 
             ev.setDisplayId(mContext.getDisplay().getDisplayId());
             return InputManagerGlobal.getInstance()
                     .injectInputEvent(ev, InputManager.INJECT_INPUT_EVENT_MODE_ASYNC);
+        }
+
+        private boolean sendEvent(int action, int code) {
+            return sendEvent(action, code, 0, 0);
         }
 
         @Override
@@ -487,6 +515,12 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
         Log.w(TAG_OPS, "Binder supposed established connection but actual connection to service "
             + "timed out, trying again");
         retryConnectionWithBackoff();
+    };
+
+    private final Runnable mDeferredBindAfterTimedOutCleanup = () -> {
+        Log.w(TAG_OPS, "Timed out waiting for previous service to clean up, binding to new one");
+        mIsPrevServiceCleanedUp = true;
+        maybeBindService();
     };
 
     private final BroadcastReceiver mUserEventReceiver = new BroadcastReceiver() {
@@ -859,6 +893,7 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
                 mShadeViewControllerLazy.get().cancelInputFocusTransfer();
             });
         }
+        mIsPrevServiceCleanedUp = true;
         startConnectionToCurrentUser();
     }
 
@@ -889,6 +924,19 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
         }
         mHandler.removeCallbacks(mConnectionRunnable);
 
+        maybeBindService();
+    }
+
+    private void maybeBindService() {
+        if (!mIsPrevServiceCleanedUp) {
+            Log.w(TAG_OPS, "Skipping connection to TouchInteractionService until previous"
+                    + " instance is cleaned up.");
+            if (!mHandler.hasCallbacks(mDeferredConnectionCallback)) {
+                mHandler.postDelayed(mDeferredBindAfterTimedOutCleanup, BACKOFF_MILLIS);
+            }
+            return;
+        }
+
         // Avoid creating TouchInteractionService because the System user in HSUM mode does not
         // interact with UI elements
         UserHandle currentUser = UserHandle.of(mUserTracker.getUserId());
@@ -907,6 +955,7 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
             Log.e(TAG_OPS, "Unable to bind because of security error", e);
         }
         if (mBound) {
+            mIsPrevServiceCleanedUp = false;
             // Ensure that connection has been established even if it thinks it is bound
             mHandler.postDelayed(mDeferredConnectionCallback, DEFERRED_CALLBACK_MILLIS);
         } else {
@@ -960,6 +1009,24 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
             // Always unbind the service (ie. if called through onNullBinding or onBindingDied)
             mContext.unbindService(mOverviewServiceConnection);
             mBound = false;
+            if (mOverviewProxy != null) {
+                try {
+                    mOverviewProxy.onUnbind(new IRemoteCallback.Stub() {
+                        @Override
+                        public void sendResult(Bundle data) throws RemoteException {
+                            // Received Launcher reply, try to bind anew.
+                            mIsPrevServiceCleanedUp = true;
+                            if (mHandler.hasCallbacks(mDeferredBindAfterTimedOutCleanup)) {
+                                mHandler.removeCallbacks(mDeferredBindAfterTimedOutCleanup);
+                                maybeBindService();
+                            }
+                        }
+                    });
+                } catch (RemoteException e) {
+                    Log.w(TAG_OPS, "disconnectFromLauncherService failed to notify Launcher");
+                    mIsPrevServiceCleanedUp = true;
+                }
+            }
         }
 
         if (mOverviewProxy != null) {
@@ -1189,6 +1256,7 @@ public class OverviewProxyService implements CallbackController<OverviewProxyLis
         pw.print("  mInputFocusTransferStartMillis="); pw.println(mInputFocusTransferStartMillis);
         pw.print("  mActiveNavBarRegion="); pw.println(mActiveNavBarRegion);
         pw.print("  mNavBarMode="); pw.println(mNavBarMode);
+        pw.print("  mIsPrevServiceCleanedUp="); pw.println(mIsPrevServiceCleanedUp);
         mSysUiState.dump(pw, args);
     }
 
