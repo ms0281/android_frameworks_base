@@ -32,10 +32,14 @@ import static android.os.OsProtoEnums.BATTERY_PLUGGED_NONE;
 import android.content.Context;
 import android.content.Intent;
 import android.os.BatteryManager;
+import android.util.Slog;
 
 import com.android.settingslib.R;
 
 import java.util.Optional;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.FileReader;
 
 /**
  * Stores and computes some battery information.
@@ -60,6 +64,9 @@ public class BatteryStatus {
     public final float maxChargingCurrent;
     public final float maxChargingVoltage;
     public final float maxChargingWattage;
+    public float actualChargingCurrent = -1f;
+    public float actualChargingVoltage = -1f;
+    public float actualChargingWattage = -1f;
     public final float temperature;
     public final boolean present;
     public final Optional<Boolean> incompatibleCharger;
@@ -112,6 +119,17 @@ public class BatteryStatus {
             maxChargingMicroVolt = DEFAULT_CHARGING_VOLTAGE_MICRO_VOLT;
         }
         maxChargingVoltage = maxChargingMicroVolt;
+        this.actualChargingCurrent = Math.abs(readFloatFromFile("/sys/class/power_supply/bms/current_now", 1_000_000f));
+        this.actualChargingVoltage = readFloatFromFile("/sys/class/power_supply/bms/voltage_now", 1_000_000f);
+        if (this.actualChargingCurrent > 0 && this.actualChargingVoltage > 0) {
+            this.actualChargingWattage = Math.abs(this.actualChargingCurrent * this.actualChargingVoltage);
+        } else {
+            Slog.d("BatteryStatus", "Falling back to maxCharging values");
+            this.actualChargingWattage = -1f;
+        }
+        Slog.d("BatteryStatus", "actualCurrent=" + this.actualChargingCurrent
+        + ", actualVoltage=" + this.actualChargingVoltage
+        + ", actualWattage=" + this.actualChargingWattage);
     }
 
     /** Determine whether the device is plugged. */
@@ -433,4 +451,15 @@ public class BatteryStatus {
                         ? R.integer.config_chargingFastThreshold_v2
                         : R.integer.config_chargingFastThreshold;
     }
+    private float readFloatFromFile(String path, float scale) {
+    try (BufferedReader reader = new BufferedReader(new FileReader(path))) {
+        String line = reader.readLine();
+        float value = Float.parseFloat(line.trim());
+        Slog.d("BatteryStatus", "Read from " + path + ": " + value);
+        return value / scale;
+    } catch (IOException | NumberFormatException e) {
+        Slog.e("BatteryStatus", "Failed to read " + path, e);
+        return -1f;
+    }
+}
 }
