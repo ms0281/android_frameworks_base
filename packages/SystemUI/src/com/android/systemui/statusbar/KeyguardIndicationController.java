@@ -221,12 +221,9 @@ public class KeyguardIndicationController {
     private int mBatteryLevel = -1;
     private boolean mBatteryPresent = true;
     protected long mChargingTimeRemaining;
-    private float mChargingCurrent;
-    private float mChargingVoltage;
     private float mActualChargingCurrent;
     private float mActualChargingVoltage;
     private float mActualChargingWattage;
-    private float mTemperature;
     private Pair<String, BiometricSourceType> mBiometricErrorMessageToShowOnScreenOn;
     private Set<Integer> mCoExFaceAcquisitionMsgIdsToShow;
     private final FaceHelpMessageDeferral mFaceAcquiredMessageDeferral;
@@ -1149,39 +1146,67 @@ public class KeyguardIndicationController {
         }
 
         String batteryInfo = "";
-        boolean showbatteryInfo = Settings.System.getIntForUser(mContext.getContentResolver(),
-            Settings.System.LOCKSCREEN_BATTERY_INFO, 1, UserHandle.USER_CURRENT) == 1;
+        boolean showbatteryInfo = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+            "lockscreen_battery_stats", 0, UserHandle.USER_CURRENT) == 1;
+        boolean forceMaUnit = Settings.Secure.getIntForUser(mContext.getContentResolver(),
+            "lockscreen_battery_stats_ma_only", 0, UserHandle.USER_CURRENT) == 1;
          if (showbatteryInfo) {
-            if (mActualChargingCurrent > 0f) {
-                batteryInfo += (mActualChargingCurrent >= 1.0f)
-                    ? String.format("%.1f", (mActualChargingCurrent)) + "A"
-                    : String.format("%.0f", (mActualChargingCurrent * 1000f)) + "mA";
-            } else if (mChargingCurrent > 0f) {
-                batteryInfo += (mChargingCurrent >= 1_000_000f)
-                    ? String.format("%.1f", (mChargingCurrent / 1_000_000f)) + "A"
-                    : String.format("%.0f", (mChargingCurrent / 1000f)) + "mA";
-            }
-            if (mActualChargingWattage > 0f && mActualChargingCurrent > 0f && mActualChargingVoltage > 0f) {
-                batteryInfo = (batteryInfo.isEmpty() ? "" : batteryInfo + " · ") +
-                        String.format("%.1f" , (mActualChargingWattage)) + "W";
-            } else if (mChargingWattage > 0f) {
-                batteryInfo = (batteryInfo.isEmpty() ? "" : batteryInfo + " · ") +
-                        String.format("%.1f" , (mChargingWattage / 1_000_000f)) + "W";
-            }
-            if (mActualChargingVoltage > 0f) {
-                batteryInfo += (batteryInfo.isEmpty() ? "" : " • ") +
-                        String.format("%.0f", (mActualChargingVoltage)) + "V";
-            } else if (mChargingVoltage > 0f) {
-                batteryInfo += (batteryInfo.isEmpty() ? "" : " • ") +
-                        String.format("%.0f", (mChargingVoltage / 1_000_000f)) + "V";
-            }
-            if (mTemperature > 0f) {
-                batteryInfo = (batteryInfo.isEmpty() ? "" : batteryInfo + " · ") +
-                        String.format("%.1f", (mTemperature / 10)) + "°C";
-            }
-            if (!batteryInfo.isEmpty()) {
-                batteryInfo = "\n" + batteryInfo;
-            }
+             batteryInfo = "";
+             float current = Settings.Secure.getFloatForUser(
+                 mContext.getContentResolver(),
+                 "lockscreen_current",
+                 -1f,
+                 UserHandle.USER_CURRENT
+             );
+             float voltage = Settings.Secure.getFloatForUser(
+                 mContext.getContentResolver(),
+                 "lockscreen_voltage",
+                 -1f,
+                 UserHandle.USER_CURRENT
+             );
+             float wattage = Settings.Secure.getFloatForUser(
+                 mContext.getContentResolver(),
+                 "lockscreen_wattage",
+                 -1f,
+                 UserHandle.USER_CURRENT
+             );
+             float temperature = Settings.Secure.getFloatForUser(
+                 mContext.getContentResolver(),
+                 "lockscreen_temperature",
+                 -1f,
+                 UserHandle.USER_CURRENT
+             );
+
+             // current
+             if (current > 0f) {
+                 if (forceMaUnit || current < 1.0f) {
+                     batteryInfo += String.format("%.0f", current * 1000f) + "mA";
+                 } else {
+                     batteryInfo += String.format("%.1f", current) + "A";
+                 }
+             }
+
+             // wattage
+             if (wattage > 0f) {
+                 batteryInfo = (batteryInfo.isEmpty() ? "" : batteryInfo + " · ") +
+                 String.format("%.1f", wattage) + "W";
+             }
+
+             // voltage
+             if (voltage > 0f) {
+                 batteryInfo += (batteryInfo.isEmpty() ? "" : " • ") +
+                 String.format("%.0f", voltage) + "V";
+             }
+
+             // temperature
+             if (temperature > 0f) {
+                 batteryInfo = (batteryInfo.isEmpty() ? "" : batteryInfo + " · ") +
+                 String.format("%.1f", temperature) + "°C";
+             }
+
+             if (!batteryInfo.isEmpty()) {
+                 batteryInfo = "\n" + batteryInfo;
+             }
         }
 
         String percentage = NumberFormat.getPercentInstance().format(mBatteryLevel / 100f);
@@ -1325,8 +1350,6 @@ public class KeyguardIndicationController {
             mPowerPluggedInDock = status.isPluggedInDock() && isChargingOrFull;
             mPowerPluggedIn = isPowerPluggedIn(status, isChargingOrFull);
             mPowerCharged = status.isCharged();
-            mChargingCurrent = status.maxChargingCurrent;
-            mChargingVoltage = status.maxChargingVoltage;
             mActualChargingCurrent = status.actualChargingCurrent;
             mActualChargingVoltage = status.actualChargingVoltage;
             mChargingWattage = status.maxChargingWattage;
@@ -1334,7 +1357,6 @@ public class KeyguardIndicationController {
             mChargingSpeed = status.getChargingSpeed(mContext);
             mBatteryLevel = status.level;
             mBatteryPresent = status.present;
-            mTemperature = status.temperature;
             mBatteryDefender = isBatteryDefender(status);
             // when the battery is overheated, device doesn't charge so only guard on pluggedIn:
             mEnableBatteryDefender = mBatteryDefender && status.isPluggedIn();

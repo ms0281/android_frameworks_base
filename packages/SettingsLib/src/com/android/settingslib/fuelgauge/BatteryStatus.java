@@ -33,6 +33,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.BatteryManager;
 import android.util.Slog;
+import android.app.ActivityThread;
 
 import com.android.settingslib.R;
 
@@ -61,13 +62,11 @@ public class BatteryStatus {
     public final int level;
     public final int plugged;
     public final int chargingStatus;
-    public final float maxChargingCurrent;
-    public final float maxChargingVoltage;
     public final float maxChargingWattage;
     public float actualChargingCurrent = -1f;
     public float actualChargingVoltage = -1f;
     public float actualChargingWattage = -1f;
-    public final float temperature;
+    public float temperature;
     public final boolean present;
     public final Optional<Boolean> incompatibleCharger;
 
@@ -78,21 +77,15 @@ public class BatteryStatus {
     }
 
     public BatteryStatus(int status, int level, int plugged, int chargingStatus,
-            float maxChargingWattage, boolean present,
-            float maxChargingCurrent, float maxChargingVoltage,
-            float temperature) {
+            float maxChargingWattage, boolean present) {
         this.status = status;
         this.level = level;
         this.plugged = plugged;
         this.chargingStatus = chargingStatus;
-        this.maxChargingCurrent = maxChargingCurrent;
-        this.maxChargingVoltage = maxChargingVoltage;
         this.maxChargingWattage = maxChargingWattage;
         this.present = present;
-        this.temperature = temperature;
         this.incompatibleCharger = Optional.empty();
     }
-
 
     public BatteryStatus(Intent batteryChangedIntent) {
         this(batteryChangedIntent, Optional.empty());
@@ -109,27 +102,24 @@ public class BatteryStatus {
         chargingStatus = batteryChangedIntent.getIntExtra(EXTRA_CHARGING_STATUS,
                 CHARGING_POLICY_DEFAULT);
         present = batteryChangedIntent.getBooleanExtra(EXTRA_PRESENT, true);
-        temperature = batteryChangedIntent.getIntExtra(EXTRA_TEMPERATURE, -1);
         this.incompatibleCharger = incompatibleCharger;
 
         maxChargingWattage = calculateMaxChargingMicroWatt(batteryChangedIntent);
-        maxChargingCurrent = batteryChangedIntent.getIntExtra(EXTRA_MAX_CHARGING_CURRENT, -1);
-        int maxChargingMicroVolt = batteryChangedIntent.getIntExtra(EXTRA_MAX_CHARGING_VOLTAGE, -1);
-        if (maxChargingMicroVolt <= 0) {
-            maxChargingMicroVolt = DEFAULT_CHARGING_VOLTAGE_MICRO_VOLT;
-        }
-        maxChargingVoltage = maxChargingMicroVolt;
-        this.actualChargingCurrent = Math.abs(readFloatFromFile("/sys/class/power_supply/bms/current_now", 1_000_000f));
-        this.actualChargingVoltage = readFloatFromFile("/sys/class/power_supply/bms/voltage_now", 1_000_000f);
-        if (this.actualChargingCurrent > 0 && this.actualChargingVoltage > 0) {
-            this.actualChargingWattage = Math.abs(this.actualChargingCurrent * this.actualChargingVoltage);
-        } else {
-            Slog.d("BatteryStatus", "Falling back to maxCharging values");
-            this.actualChargingWattage = -1f;
-        }
-        Slog.d("BatteryStatus", "actualCurrent=" + this.actualChargingCurrent
-        + ", actualVoltage=" + this.actualChargingVoltage
-        + ", actualWattage=" + this.actualChargingWattage);
+
+        Context context = ActivityThread.currentApplication().getApplicationContext();
+
+        if (ChargingStatsHelper.isSysuiOrKeyguardContext(context)) {
+            float current = Math.abs(ChargingStatsHelper.readFloatFromFile("/sys/class/power_supply/bms/current_now", 1_000_000f));
+            float voltage = ChargingStatsHelper.readFloatFromFile("/sys/class/power_supply/bms/voltage_now", 1_000_000f);
+            float wattage = current > 0 && voltage > 0 ? current * voltage : -1f;
+
+            this.actualChargingCurrent = current;
+            this.actualChargingVoltage = voltage;
+            this.actualChargingWattage = wattage;
+            this.temperature = batteryChangedIntent.getIntExtra(EXTRA_TEMPERATURE, -1) / 10.0f;
+
+            ChargingStatsHelper.saveToSettings(context, current, voltage, wattage, temperature);
+          }
     }
 
     /** Determine whether the device is plugged. */
