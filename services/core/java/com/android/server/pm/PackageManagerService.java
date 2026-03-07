@@ -156,6 +156,7 @@ import android.compat.annotation.ChangeId;
 import android.compat.annotation.EnabledAfter;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
+import android.content.ContentProvider;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.IIntentReceiver;
@@ -2380,11 +2381,11 @@ public class PackageManagerService extends IPackageManager.Stub
                 String resolvedType, int flags, int userId, int callingUid,
                 boolean includeInstantApps) {
             if (!mUserManager.exists(userId)) return Collections.emptyList();
-            enforceCrossUserOrProfilePermission(callingUid,
+            enforceCrossUserOrProfilePermission(Binder.getCallingUid(),
                     userId,
                     false /*requireFullPermission*/,
                     false /*checkShell*/,
-                    "query intent receivers");
+                    "query intent services");
             final String instantAppPkgName = getInstantAppPackageName(callingUid);
             flags = updateFlagsForResolve(flags, userId, callingUid, includeInstantApps,
                     false /* isImplicitImageCaptureIntentAndNotSetByDpc */);
@@ -3379,6 +3380,18 @@ public class PackageManagerService extends IPackageManager.Stub
 
                 generateFakeSignature(p).ifPresent(fakeSignature -> {
                     packageInfo.signatures = new Signature[]{fakeSignature};
+                    try {
+                        packageInfo.signingInfo = new SigningInfo(
+                                new SigningDetails(
+                                        packageInfo.signatures,
+                                        SigningDetails.SignatureSchemeVersion.SIGNING_BLOCK_V3,
+                                        PackageParser.toSigningKeys(packageInfo.signatures),
+                                        null
+                                )
+                        );
+                    } catch (CertificateException e) {
+                        Slog.e(TAG, "Caught an exception when creating signing keys: ", e);
+                    }
                 });
 
                 return packageInfo;
@@ -4077,10 +4090,10 @@ public class PackageManagerService extends IPackageManager.Stub
                 return true;
             }
             if (requireFullPermission) {
-                return hasPermission(Manifest.permission.INTERACT_ACROSS_USERS_FULL);
+                return hasPermission(Manifest.permission.INTERACT_ACROSS_USERS_FULL, callingUid);
             }
-            return hasPermission(android.Manifest.permission.INTERACT_ACROSS_USERS_FULL)
-                    || hasPermission(Manifest.permission.INTERACT_ACROSS_USERS);
+            return hasPermission(android.Manifest.permission.INTERACT_ACROSS_USERS_FULL, callingUid)
+                    || hasPermission(Manifest.permission.INTERACT_ACROSS_USERS, callingUid);
         }
 
         /**
@@ -4093,6 +4106,11 @@ public class PackageManagerService extends IPackageManager.Stub
 
         private boolean hasPermission(String permission) {
             return mContext.checkCallingOrSelfPermission(permission)
+                    == PackageManager.PERMISSION_GRANTED;
+        }
+
+        private boolean hasPermission(String permission, int uid) {
+            return mContext.checkPermission(permission, /* pid= */ -1, uid)
                     == PackageManager.PERMISSION_GRANTED;
         }
 
@@ -11652,7 +11670,7 @@ public class PackageManagerService extends IPackageManager.Stub
         final boolean listUninstalled = (flags & MATCH_KNOWN_PACKAGES) != 0;
 
         enforceCrossUserPermission(
-            callingUid,
+            Binder.getCallingUid(),
             userId,
             false /* requireFullPermission */,
             false /* checkShell */,
@@ -11863,7 +11881,13 @@ public class PackageManagerService extends IPackageManager.Stub
             int callingUid) {
         if (!mUserManager.exists(userId)) return null;
         flags = updateFlagsForComponent(flags, userId);
-        final ProviderInfo providerInfo = mComponentResolver.queryProvider(name, flags, userId);
+
+        // Callers of this API may not always separate the userID and authority. Let's parse it
+        // before resolving
+        String authorityWithoutUserId = ContentProvider.getAuthorityWithoutUserId(name);
+        userId = ContentProvider.getUserIdFromAuthority(name, userId);
+        final ProviderInfo providerInfo = mComponentResolver.queryProvider(
+                authorityWithoutUserId, flags, userId);
         boolean checkedGrants = false;
         if (providerInfo != null) {
             // Looking for cross-user grants before enforcing the typical cross-users permissions
@@ -16155,9 +16179,11 @@ public class PackageManagerService extends IPackageManager.Stub
                 if (shouldFilterApplicationLocked(pkgSetting, callingUid, userId)) {
                     return false;
                 }
-                // Do not allow "android" is being disabled
-                if ("android".equals(packageName)) {
-                    Slog.w(TAG, "Cannot hide package: android");
+            // Don't allow hiding "android" or SysUI as it makes device unusable.
+            if ("android".equals(packageName)
+                    || LocalServices.getService(PackageManagerInternal.class)
+                            .getSystemUiServiceComponent().getPackageName().equals(packageName)) {
+                Slog.w(TAG, "Cannot hide package: " + packageName);
                     return false;
                 }
                 // Cannot hide static shared libs as they are considered
@@ -16422,6 +16448,9 @@ public class PackageManagerService extends IPackageManager.Stub
                     (installFlags & PackageManager.INSTALL_INSTANT_APP) != 0;
             final boolean fullApp =
                     (installFlags & PackageManager.INSTALL_FULL_APP) != 0;
+            final boolean isPackageDeviceAdmin = isPackageDeviceAdmin(packageName, userId);
+            final boolean isProtectedPackage = mProtectedPackages != null
+                    && mProtectedPackages.isPackageStateProtected(userId, packageName);
 
             // writer
             synchronized (mLock) {
@@ -16429,7 +16458,8 @@ public class PackageManagerService extends IPackageManager.Stub
                 if (pkgSetting == null) {
                     return PackageManager.INSTALL_FAILED_INVALID_URI;
                 }
-                if (instantApp && (pkgSetting.isSystem() || isUpdatedSystemApp(pkgSetting))) {
+                if (instantApp && (pkgSetting.isSystem() || isUpdatedSystemApp(pkgSetting)
+                        || isPackageDeviceAdmin || isProtectedPackage)) {
                     return PackageManager.INSTALL_FAILED_INVALID_URI;
                 }
                 if (!canViewInstantApps(callingUid, UserHandle.getUserId(callingUid))) {
@@ -28993,10 +29023,20 @@ public class PackageManagerService extends IPackageManager.Stub
         }
     }
 
-    private void applyMimeGroupChanges(String packageName, String mimeGroup) {
+    private void applyMimeGroupChanges(String packageName, String mimeGroup,
+            List<Integer> packageUids) {
         if (mComponentResolver.updateMimeGroup(packageName, mimeGroup)) {
-            Binder.withCleanCallingIdentity(() ->
-                    clearPackagePreferredActivities(packageName, UserHandle.USER_ALL));
+            Binder.withCleanCallingIdentity(() -> {
+                clearPackagePreferredActivities(packageName, UserHandle.USER_ALL);
+                // Send the ACTION_PACKAGE_CHANGED when the mimeGroup has changes
+                final ArrayList<String> components = new ArrayList<>(
+                        Collections.singletonList(packageName));
+                final String reason = "The mimeGroup is changed";
+                for (int i = 0; i < packageUids.size(); i++) {
+                    sendPackageChangedBroadcast(packageName, true /* dontKillApp */,
+                            components, packageUids.get(i), reason);
+                }
+            });
         }
 
         mPmInternal.writeSettings(false);
@@ -29006,11 +29046,23 @@ public class PackageManagerService extends IPackageManager.Stub
     public void setMimeGroup(String packageName, String mimeGroup, List<String> mimeTypes) {
         enforceOwnerRights(packageName, Binder.getCallingUid());
         final boolean changed;
+        final List<Integer> packageUids = new ArrayList<Integer>();
         synchronized (mLock) {
-            changed = mSettings.getPackageLPr(packageName).setMimeGroup(mimeGroup, mimeTypes);
+            final PackageSetting ps = mSettings.getPackageLPr(packageName);
+            changed = ps.setMimeGroup(mimeGroup, mimeTypes);
+            if (changed) {
+                final int appId = ps.appId;
+                final int[] userIds = resolveUserIds(UserHandle.USER_ALL);
+                for (int i = 0; i < userIds.length; i++) {
+                    final int userId = userIds[i];
+                    if (ps.getInstalled(userId)) {
+                        packageUids.add(UserHandle.getUid(userId, appId));
+                    }
+                }
+            }
         }
         if (changed) {
-            applyMimeGroupChanges(packageName, mimeGroup);
+            applyMimeGroupChanges(packageName, mimeGroup, packageUids);
         }
     }
 
